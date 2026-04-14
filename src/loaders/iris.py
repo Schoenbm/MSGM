@@ -103,6 +103,7 @@ def _load_csv_from_zip(url: str, cache_name: str, dep_code: str) -> pd.DataFrame
 def load_iris(
     iris_codes: list[str] | None = None,
     dep_code: str = _DEFAULT_DEP,
+    shp_path: "str | Path | None" = None,
 ) -> gpd.GeoDataFrame:
     """Load IRIS geometries + 2022 census population.
 
@@ -114,32 +115,42 @@ def load_iris(
 
     Args:
         iris_codes: Liste de codes IRIS à 9 chiffres (ex. ["381850101", "381850102"]).
-                    Si fournie, filtre sur ces IRIS uniquement.
-                    Si absente, filtre par dep_code (département entier).
-        dep_code:   Code département de secours (default "38" = Isère).
+                    Si fournie, filtre sur ces IRIS via téléchargement IGN.
+        dep_code:   Code département de secours si ni iris_codes ni shp_path fournis.
+        shp_path:   Shapefile utilisateur contenant les IRIS (colonne code_iris ou
+                    CODE_IRIS). Si fourni, évite le téléchargement IGN.
 
     Returns:
         GeoDataFrame avec une ligne par IRIS.
     """
-    # 1. Contours IRIS (IGN, 2024)
-    archive = _download(_CONTOURS_URL, _CACHE_DIR / "contours-iris-2024.7z")
-    shp_path = _extract_contours_7z(archive, _CACHE_DIR / "contours-iris-2024")
-
-    gdf = gpd.read_file(shp_path)
-    logger.info("CONTOURS-IRIS chargés : %d IRIS (France entière)", len(gdf))
-
-    if iris_codes:
-        gdf = gdf[gdf["CODE_IRIS"].isin(iris_codes)].copy()
-        logger.info("Filtré sur %d codes IRIS : %d trouvés", len(iris_codes), len(gdf))
-        if len(gdf) < len(iris_codes):
-            missing = set(iris_codes) - set(gdf["CODE_IRIS"])
-            logger.warning("%d codes IRIS non trouvés : %s", len(missing), sorted(missing))
+    # 1. Contours IRIS
+    if shp_path is not None:
+        gdf = gpd.read_file(Path(shp_path))
+        # Drop fid column that conflicts with GeoPackage format
+        if "fid" in gdf.columns:
+            gdf = gdf.drop(columns=["fid"])
+        # Normaliser la casse de la colonne code IRIS
+        if "code_iris" in gdf.columns and "CODE_IRIS" not in gdf.columns:
+            gdf = gdf.rename(columns={"code_iris": "CODE_IRIS"})
+        logger.info("IRIS chargés depuis shapefile : %d IRIS", len(gdf))
     else:
-        gdf = gdf[gdf["CODE_IRIS"].str.startswith(dep_code)].copy()
-        logger.info("Filtré dept %s : %d IRIS", dep_code, len(gdf))
+        archive = _download(_CONTOURS_URL, _CACHE_DIR / "contours-iris-2024.7z")
+        contours_shp = _extract_contours_7z(archive, _CACHE_DIR / "contours-iris-2024")
+        gdf = gpd.read_file(contours_shp)
+        logger.info("CONTOURS-IRIS chargés : %d IRIS (France entière)", len(gdf))
+
+        if iris_codes:
+            gdf = gdf[gdf["CODE_IRIS"].isin(iris_codes)].copy()
+            logger.info("Filtré sur %d codes IRIS : %d trouvés", len(iris_codes), len(gdf))
+            if len(gdf) < len(iris_codes):
+                missing = set(iris_codes) - set(gdf["CODE_IRIS"])
+                logger.warning("%d codes IRIS non trouvés : %s", len(missing), sorted(missing))
+        else:
+            gdf = gdf[gdf["CODE_IRIS"].str.startswith(dep_code)].copy()
+            logger.info("Filtré dept %s : %d IRIS", dep_code, len(gdf))
 
     # 2. Population par IRIS (INSEE RP 2022) — filtrage CSV par département
-    csv_dep = iris_codes[0][:2] if iris_codes else dep_code
+    csv_dep = gdf["CODE_IRIS"].iloc[0][:2] if not gdf.empty else dep_code
     pop = _load_csv_from_zip(_POP_URL, "base-ic-pop-2022.zip", csv_dep)
     log = _load_csv_from_zip(_LOG_URL, "base-ic-logement-2022.zip", csv_dep)
 

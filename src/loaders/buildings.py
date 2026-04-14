@@ -6,8 +6,28 @@ import geopandas as gpd
 
 logger = logging.getLogger(__name__)
 
-SURFACE_MOY_DEFAULT: float = 65.0  # m² par logement
+SURFACE_MOY_DEFAULT: float = 160.0  # m² par logement volumique (surface × nb_étages / NB_LOGTS, médiane BDTopo Grenoble)
 HAUTEUR_PAR_ETAGE: float = 3.0     # m par étage (fallback)
+SURFACE_MIN_IRIS: int = 5          # nb min de bâtiments connus pour calibrer localement
+
+# Tags OSM indiquant un bâtiment résidentiel
+OSM_RESIDENTIAL_TAGS: frozenset[str] = frozenset({
+    "residential", "apartments", "house", "detached", "semidetached_house",
+    "terrace", "dormitory", "bungalow", "static_caravan", "cabin",
+    "yes",  # tag générique — conservé car souvent résidentiel
+})
+
+# Tags OSM indiquant explicitement un bâtiment non-résidentiel
+OSM_NON_RESIDENTIAL_TAGS: frozenset[str] = frozenset({
+    "commercial", "retail", "office", "industrial", "warehouse",
+    "shop", "kiosk", "supermarket", "hotel", "civic", "public",
+    "church", "cathedral", "chapel", "mosque", "synagogue", "temple",
+    "sports_hall", "stadium", "train_station", "transportation",
+    "hospital", "school", "university", "kindergarten", "college",
+    "fire_station", "police", "post_office", "government",
+    "garage", "garages", "parking", "shed", "greenhouse", "barn",
+    "farm_auxiliary", "manufacture", "service",
+})
 
 
 def _fix_encoding(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
@@ -27,6 +47,7 @@ def _fix_encoding(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
 def load_buildings(
     path: str | Path,
     study_area: "gpd.GeoDataFrame | None" = None,
+    osm_gdf: "gpd.GeoDataFrame | None" = None,
 ) -> gpd.GeoDataFrame:
     """Charge le shapefile bâtiments, filtre les résidentiels et estime NB_LOGTS.
 
@@ -35,6 +56,9 @@ def load_buildings(
         study_area: GeoDataFrame d'une seule géométrie (union des IRIS choisis).
                     Si fourni, seuls les bâtiments dont le centroïde se trouve
                     dans la zone d'étude sont conservés.
+        osm_gdf:    GeoDataFrame des bâtiments OSM (issu de fetch_osm_buildings).
+                    Si fourni, enrichit les bâtiments avec building:flats et
+                    building:levels via match_osm_to_bdtopo.
     """
     path = Path(path)
     logger.info("Chargement des bâtiments depuis %s", path)
@@ -45,6 +69,11 @@ def load_buildings(
 
     if study_area is not None:
         gdf = _filter_by_study_area(gdf, study_area)
+
+    # Appariement OSM en premier : fournit osm_building pour le filtre résidentiel
+    if osm_gdf is not None:
+        from src.loaders.osm import match_osm_to_bdtopo
+        gdf = match_osm_to_bdtopo(gdf, osm_gdf)
 
     gdf = filter_residential(gdf)
     logger.info("%d bâtiments résidentiels conservés", len(gdf))
@@ -78,53 +107,187 @@ def _filter_by_study_area(
 
 
 def filter_residential(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    """Garde les bâtiments résidentiels selon USAGE1/USAGE2 et NB_LOGTS."""
-    usage1 = gdf.get("USAGE1", gpd.pd.Series(dtype=str))
-    usage2 = gdf.get("USAGE2", gpd.pd.Series(dtype=str))
-    nb_logts = gdf.get("NB_LOGTS", gpd.pd.Series(dtype=float))
+    """Garde les bâtiments résidentiels selon USAGE1/USAGE2 puis vérifie sur OSM.
+
+    Logique :
+      1. ``USAGE1 == "Résidentiel"`` → toujours conservé (source BD_TOPO fiable)
+      2. Tous les autres bâtiments → vérification via le tag ``osm_building`` :
+         - tag résidentiel (OSM_RESIDENTIAL_TAGS)     → conservé
+         - tag non-résidentiel (OSM_NON_RESIDENTIAL_TAGS) → exclu
+         - pas de données OSM / tag inconnu → conservé uniquement si Indifférencié
+    """
+    import pandas as pd
+
+    usage1 = gdf.get("USAGE1", pd.Series(dtype=str, index=gdf.index))
+    usage2 = gdf.get("USAGE2", pd.Series(dtype=str, index=gdf.index))
 
     usage1_null = usage1.isna() | (usage1.astype(str).str.strip() == "")
 
-    mask = (
-        (usage1 == "Résidentiel")
-        | (usage1_null & (usage2 == "Résidentiel"))
-        | ((usage1 == "Indifférencié") & (nb_logts.fillna(0) > 0))
-    )
+    # Cas 1 : BD_TOPO dit explicitement "Résidentiel"
+    mask_bdtopo = (usage1 == "Résidentiel") | (usage1_null & (usage2 == "Résidentiel"))
 
+    # Cas 2 : tous les autres → vérification OSM
+    others = ~mask_bdtopo
+
+    if "osm_building" in gdf.columns:
+        osm_tag = gdf["osm_building"].fillna("").str.lower().str.strip()
+        osm_is_residential = osm_tag.isin(OSM_RESIDENTIAL_TAGS)
+        osm_is_non_residential = osm_tag.isin(OSM_NON_RESIDENTIAL_TAGS)
+        osm_unknown = ~osm_is_residential & ~osm_is_non_residential
+
+        # Conserve si OSM dit résidentiel, ou si OSM inconnu et usage=Indifférencié
+        mask_others = others & (
+            osm_is_residential | (osm_unknown & (usage1 == "Indifférencié"))
+        )
+
+        n_osm_kept = int((others & osm_is_residential).sum())
+        n_osm_excluded = int((others & osm_is_non_residential).sum())
+        logger.info(
+            "Filtre OSM : +%d bâtiments non-Résidentiel reclassifiés résidentiels, "
+            "-%d exclus (tag OSM non-résidentiel)",
+            n_osm_kept, n_osm_excluded,
+        )
+    else:
+        # Pas de données OSM : comportement précédent (uniquement Indifférencié)
+        mask_others = others & (usage1 == "Indifférencié")
+
+    mask = mask_bdtopo | mask_others
     return gdf[mask].copy()
 
 
+def _compute_nb_etages(gdf: gpd.GeoDataFrame) -> gpd.pd.Series:
+    """Calcule le nombre d'étages par bâtiment.
+
+    Priorité décroissante :
+      1. ``NB_ETAGES`` BD_TOPO  (valeur explicite)
+      2. ``HAUTEUR``   BD_TOPO  (dérivé : floor(H / 3 m))
+      3. ``osm_levels``          (tag OSM building:levels)
+      4. Défaut : 1 étage
+    """
+    import pandas as pd
+
+    result = pd.Series(1.0, index=gdf.index)
+
+    # Priorité 3 (la plus basse) : osm_levels
+    if "osm_levels" in gdf.columns:
+        lev = gdf["osm_levels"]
+        valid = lev.notna() & (lev >= 1)
+        result = result.where(~valid, lev.clip(lower=1))
+
+    # Priorité 2 : HAUTEUR BD_TOPO → nb étages dérivé
+    if "HAUTEUR" in gdf.columns:
+        from_hauteur = (gdf["HAUTEUR"].fillna(0) / HAUTEUR_PAR_ETAGE).round().clip(lower=1)
+        valid = gdf["HAUTEUR"].notna() & (gdf["HAUTEUR"] > 0)
+        result = result.where(~valid, from_hauteur)
+
+    # Priorité 1 (la plus haute) : NB_ETAGES BD_TOPO
+    if "NB_ETAGES" in gdf.columns:
+        nb = gdf["NB_ETAGES"].fillna(0).clip(lower=0)
+        valid = nb >= 1
+        result = result.where(~valid, nb)
+
+    return result.clip(lower=1)
+
+
+def _surface_par_logt_par_iris(gdf: gpd.GeoDataFrame) -> gpd.pd.Series:
+    """Calcule la surface volumique médiane par logement par IRIS sur les bâtiments connus.
+
+    Surface volumique = (surface_sol × nb_étages) / NB_LOGTS — cohérente avec la
+    formule d'estimation qui multiplie aussi par nb_étages. Utiliser la surface
+    au sol seule (surface_sol / NB_LOGTS) introduirait un biais ×nb_étages systématique.
+
+    Pour chaque bâtiment à estimer, retourne la surface volumique médiane par logement
+    observée sur les bâtiments avec NB_LOGTS connu dans le même IRIS.
+    Fallback sur SURFACE_MOY_DEFAULT si l'IRIS n'a pas assez de bâtiments connus.
+
+    Nécessite la colonne `code_iris` dans gdf (présente dans batim_grenoble.shp).
+    """
+    if "code_iris" not in gdf.columns:
+        logger.debug("Colonne code_iris absente — calibration globale uniquement")
+        return gpd.pd.Series(SURFACE_MOY_DEFAULT, index=gdf.index)
+
+    known = gdf[gdf["NB_LOGTS"].notna() & (gdf["NB_LOGTS"] > 0)].copy()
+    # Surface volumique (cohérente avec l'estimation) : surface_sol × nb_étages / NB_LOGTS
+    nb_etages_known = _compute_nb_etages(known)
+    known["_surf_logt"] = (known.geometry.area * nb_etages_known) / known["NB_LOGTS"].replace(0, np.nan)
+
+    # Médiane par IRIS sur les bâtiments connus
+    iris_median = (
+        known.groupby("code_iris")["_surf_logt"]
+        .agg(["median", "count"])
+        .rename(columns={"median": "surf_med", "count": "n_known"})
+    )
+
+    # Mapper sur chaque bâtiment
+    surf_series = gdf["code_iris"].map(iris_median["surf_med"])
+    n_known_series = gdf["code_iris"].map(iris_median["n_known"]).fillna(0)
+
+    # Fallback global pour les IRIS avec trop peu de bâtiments connus
+    fallback_mask = (n_known_series < SURFACE_MIN_IRIS) | surf_series.isna()
+    surf_series = surf_series.where(~fallback_mask, SURFACE_MOY_DEFAULT)
+
+    n_local = (~fallback_mask).sum()
+    n_fallback = fallback_mask.sum()
+    logger.debug(
+        "Calibration surface/logt : %d bâtiments avec IRIS local, %d avec fallback %.0fm²",
+        n_local, n_fallback, SURFACE_MOY_DEFAULT,
+    )
+    return surf_series
+
+
 def estimate_nb_logts(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    """Estime NB_LOGTS pour les bâtiments où la valeur est manquante ou nulle."""
+    """Estime NB_LOGTS pour les bâtiments où la valeur est manquante ou nulle.
+
+    Priorité décroissante :
+      1. ``NB_LOGTS``      BD_TOPO  → source ``"bdtopo"``
+      2. ``osm_flats``     OSM      → source ``"osm_flats"``  (tag building:flats)
+      3. Estimation surfacique avec calibration locale ou fallback :
+         - nb_étages : NB_ETAGES (BD_TOPO) > HAUTEUR (BD_TOPO) > osm_levels (OSM) > 1
+         - surface/logement : médiane IRIS (``code_iris``) ou SURFACE_MOY_DEFAULT
+         → source ``"iris_local"`` ou ``"fallback"``
+    """
     if "NB_LOGTS" not in gdf.columns:
         gdf["NB_LOGTS"] = np.nan
 
     needs_estimate = gdf["NB_LOGTS"].isna() | (gdf["NB_LOGTS"] == 0)
-    n_to_estimate = needs_estimate.sum()
+    gdf["NB_LOGTS_source"] = "bdtopo"
+    gdf["NB_LOGTS_ESTIME"] = False
 
+    # ── Étape 2 : building:flats OSM ──────────────────────────────────────────
+    if "osm_flats" in gdf.columns:
+        has_flats = needs_estimate & gdf["osm_flats"].notna() & (gdf["osm_flats"] > 0)
+        if has_flats.any():
+            gdf.loc[has_flats, "NB_LOGTS"] = gdf.loc[has_flats, "osm_flats"]
+            gdf.loc[has_flats, "NB_LOGTS_source"] = "osm_flats"
+            gdf.loc[has_flats, "NB_LOGTS_ESTIME"] = True
+            needs_estimate = needs_estimate & ~has_flats
+            logger.info("%d valeurs NB_LOGTS issues de OSM building:flats", has_flats.sum())
+
+    # ── Étape 3 : estimation surfacique ───────────────────────────────────────
+    n_to_estimate = needs_estimate.sum()
     if n_to_estimate == 0:
-        logger.info("Aucune estimation NB_LOGTS nécessaire")
+        logger.info("Aucune estimation NB_LOGTS nécessaire par surface")
         gdf["NB_LOGTS"] = gdf["NB_LOGTS"].astype(int)
         return gdf
 
-    # Calculer nb_étages
-    if "NB_ETAGES" in gdf.columns:
-        nb_etages = gdf["NB_ETAGES"].fillna(0).clip(lower=0)
-        # Pour les lignes à 0, fallback sur HAUTEUR si disponible
-        if "HAUTEUR" in gdf.columns:
-            from_hauteur = (gdf["HAUTEUR"].fillna(3.0) / HAUTEUR_PAR_ETAGE).round().clip(lower=1)
-            nb_etages = nb_etages.where(nb_etages >= 1, from_hauteur)
-        nb_etages = nb_etages.clip(lower=1)
-    elif "HAUTEUR" in gdf.columns:
-        nb_etages = (gdf["HAUTEUR"].fillna(3.0) / HAUTEUR_PAR_ETAGE).round().clip(lower=1)
-    else:
-        nb_etages = gpd.pd.Series(1.0, index=gdf.index)
+    nb_etages = _compute_nb_etages(gdf)
+    surf_par_logt = _surface_par_logt_par_iris(gdf)
 
     area = gdf.geometry.area
-    estimated = np.floor(area * nb_etages / SURFACE_MOY_DEFAULT).clip(lower=1)
+    estimated = np.floor(area * nb_etages / surf_par_logt).clip(lower=1)
 
     gdf.loc[needs_estimate, "NB_LOGTS"] = estimated[needs_estimate]
-    logger.info("%d valeurs NB_LOGTS estimées (surface × étages / %.0f m²)", n_to_estimate, SURFACE_MOY_DEFAULT)
+    gdf.loc[needs_estimate, "NB_LOGTS_ESTIME"] = True
+
+    is_local = needs_estimate & (surf_par_logt != SURFACE_MOY_DEFAULT)
+    is_fallback = needs_estimate & (surf_par_logt == SURFACE_MOY_DEFAULT)
+    gdf.loc[is_local, "NB_LOGTS_source"] = "iris_local"
+    gdf.loc[is_fallback, "NB_LOGTS_source"] = "fallback"
+
+    logger.info(
+        "%d valeurs NB_LOGTS estimées par surface — iris_local : %d, fallback %.0fm² : %d",
+        n_to_estimate, is_local.sum(), SURFACE_MOY_DEFAULT, is_fallback.sum(),
+    )
 
     gdf["NB_LOGTS"] = gdf["NB_LOGTS"].astype(int)
     return gdf

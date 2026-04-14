@@ -7,8 +7,14 @@ data/*.cpg
 data/*.qmd
 data/Qgis/
 data/cache/
+data/BDNB/
 genstar*/
 __pycache__/
 *.pyc
 *.pyo
 .env
+
+# Fichiers hors-projet
+*.docx
+*.pdf
+Webinar.txt

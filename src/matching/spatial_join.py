@@ -30,9 +30,14 @@ def join_buildings_to_insee(
     centroids["geometry"] = buildings.geometry.centroid
 
     # 3. Jointure spatiale : centroïde dans carreau
+    insee_cols = ["Ind_total", "geometry"]
+    for col in ("P22_MEN", "taille_moy_menage"):
+        if col in insee.columns:
+            insee_cols.append(col)
+
     joined = gpd.sjoin(
         centroids,
-        insee[["Ind_total", "geometry"]],
+        insee[insee_cols],
         how="left",
         predicate="within",
     )

@@ -64,7 +64,10 @@ def make_map(result: gpd.GeoDataFrame, output_dir: str | Path) -> Path:
         )
 
     # Basemap tiles (CartoDB Positron — light, minimal)
-    ctx.add_basemap(ax, source=ctx.providers.CartoDB.Positron, zoom="auto")
+    try:
+        ctx.add_basemap(ax, source=ctx.providers.CartoDB.Positron, zoom="auto")
+    except Exception as e:
+        logger.warning("Fond de carte indisponible (pas de réseau ?) : %s", e)
 
     # Colourbar
     sm = mcm.ScalarMappable(cmap=cmap, norm=norm)

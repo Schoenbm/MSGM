@@ -6,4 +6,5 @@ pyproj>=3.6
 matplotlib>=3.8
 contextily>=1.4
 requests>=2.31
+overpy>=0.7
 py7zr>=0.20

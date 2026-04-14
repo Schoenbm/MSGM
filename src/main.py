@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
 PROCESSED_DIR = DATA_DIR / "processed"
 
-BUILDINGS_SHP = DATA_DIR / "batim_metro_grenoble.shp"
+BUILDINGS_SHP = DATA_DIR / "batim_grenoble.shp"
 INSEE_SHP = DATA_DIR / "insee_metro_grenoble.shp"
 
 # Fichiers intermédiaires — communs aux deux sources
@@ -55,11 +55,12 @@ def step_load(
     verbose: bool = False,
     source: str = "filosofi",
     iris_codes: list[str] | None = None,
+    args_iris_shp: "str | None" = None,
 ) -> None:
     """Load + filter buildings and population grid, save intermediates.
 
-    Avec --source iris et --iris, la zone d'étude est définie par l'union
-    des IRIS fournis. Les bâtiments sont filtrés spatialement par cette zone.
+    Avec --source iris, la zone d'étude est définie par les IRIS fournis via
+    --iris-shp (shapefile) ou --iris / --iris-file (codes texte).
     """
     import logging
     _setup_logging(verbose)
@@ -76,10 +77,14 @@ def step_load(
 
     if source == "iris":
         from src.loaders.iris import load_iris
-        log.info("Chargement des IRIS INSEE 2022 (téléchargement auto si nécessaire)...")
-        if iris_codes:
-            log.info("%d codes IRIS fournis", len(iris_codes))
-        grid = load_iris(iris_codes=iris_codes)
+        if args_iris_shp:
+            log.info("Chargement des IRIS depuis shapefile : %s", args_iris_shp)
+            grid = load_iris(shp_path=args_iris_shp)
+        else:
+            log.info("Chargement des IRIS INSEE 2022 (téléchargement auto si nécessaire)...")
+            if iris_codes:
+                log.info("%d codes IRIS fournis", len(iris_codes))
+            grid = load_iris(iris_codes=iris_codes)
         grid.to_file(grid_gpkg, driver="GPKG")
         log.info("%d IRIS sauvegardés -> %s", len(grid), grid_gpkg)
 
@@ -95,14 +100,19 @@ def step_load(
         grid.to_file(grid_gpkg, driver="GPKG")
         log.info("%d carreaux sauvegardés -> %s", len(grid), grid_gpkg)
 
-    # ── Bâtiments (re-chargés si une zone d'étude est définie, sinon cache)
-    if BUILDINGS_GPKG.exists() and study_area is None:
-        log.info("Bâtiments déjà chargés : %s", BUILDINGS_GPKG)
-    else:
-        log.info("Chargement des bâtiments : %s", BUILDINGS_SHP)
-        buildings = load_buildings(BUILDINGS_SHP, study_area=study_area)
-        buildings.to_file(BUILDINGS_GPKG, driver="GPKG")
-        log.info("%d bâtiments résidentiels sauvegardés -> %s", len(buildings), BUILDINGS_GPKG)
+    # ── Bâtiments : enrichissement OSM puis chargement ────────────────────────
+    from src.loaders.osm import fetch_osm_buildings
+
+    # Zone de référence pour la bbox OSM : study_area si disponible, sinon grille entière
+    osm_bbox_area = study_area if study_area is not None else gpd.GeoDataFrame(
+        geometry=[grid.union_all()], crs=grid.crs
+    )
+    osm_gdf = fetch_osm_buildings(osm_bbox_area, cache_dir=PROCESSED_DIR)
+
+    log.info("Chargement des bâtiments : %s", BUILDINGS_SHP)
+    buildings = load_buildings(BUILDINGS_SHP, study_area=study_area, osm_gdf=osm_gdf)
+    buildings.to_file(BUILDINGS_GPKG, driver="GPKG")
+    log.info("%d bâtiments résidentiels sauvegardés -> %s", len(buildings), BUILDINGS_GPKG)
 
 
 def step_match(verbose: bool = False, source: str = "filosofi") -> None:
@@ -168,36 +178,71 @@ def step_visualize(verbose: bool = False, source: str = "filosofi") -> None:
 
 
 def step_compare(verbose: bool = False, source: str = "filosofi") -> None:
-    """Validate Filosofi allocation against IRIS 2022 census data."""
+    """Validate allocation against IRIS 2022 census data."""
     import logging
     _setup_logging(verbose)
     log = logging.getLogger(__name__)
 
     import geopandas as gpd
-    from src.output.compare import compare_results
 
-    log.info("=== STEP compare ===")
-    _require(RESULT_FILOSOFI_GPKG, "match --source filosofi")
+    log.info("=== STEP compare (source=%s) ===", source)
     _require(IRIS_GPKG, "load --source iris")
-
-    result_filosofi = gpd.read_file(RESULT_FILOSOFI_GPKG)
     iris = gpd.read_file(IRIS_GPKG)
 
-    out = compare_results(result_filosofi, iris, PROCESSED_DIR / "compare")
+    if source == "iris":
+        from src.output.compare import compare_iris_results
+        _require(RESULT_IRIS_GPKG, "match --source iris")
+        result = gpd.read_file(RESULT_IRIS_GPKG)
+        out = compare_iris_results(result, iris, PROCESSED_DIR / "compare_iris")
+    else:
+        from src.output.compare import compare_results
+        _require(RESULT_FILOSOFI_GPKG, "match --source filosofi")
+        result = gpd.read_file(RESULT_FILOSOFI_GPKG)
+        out = compare_results(result, iris, PROCESSED_DIR / "compare")
+
     log.info("Validation terminée : %s", out)
+
+
+def step_casualties(
+    verbose: bool = False,
+    source: str = "iris",
+    damage_csv: "str | None" = None,
+) -> None:
+    """Calcule les victimes et sans-abris à partir d'un CSV de dommages bâtiment."""
+    import logging
+    _setup_logging(verbose)
+    log = logging.getLogger(__name__)
+
+    from src.output.casualties import compute_casualties
+
+    log.info("=== STEP casualties ===")
+    _require(RESULT_IRIS_GPKG, "match --source iris")
+
+    if damage_csv is None:
+        print(
+            "[ERREUR] --damage-csv est obligatoire pour l'étape casualties.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    out_dir = PROCESSED_DIR / "casualties"
+    iris_csv = compute_casualties(damage_csv, RESULT_IRIS_GPKG, out_dir)
+    log.info("Résultats disponibles dans : %s", out_dir)
+    log.info("Synthèse IRIS : %s", iris_csv)
 
 
 def step_all(
     verbose: bool = False,
     source: str = "filosofi",
     iris_codes: list[str] | None = None,
+    args_iris_shp: "str | None" = None,
 ) -> None:
     """Run the full pipeline end-to-end."""
     import logging
     _setup_logging(verbose)
     logging.getLogger(__name__).info("=== PIPELINE COMPLET (source=%s) ===", source)
 
-    step_load(verbose, source, iris_codes)
+    step_load(verbose, source, iris_codes, args_iris_shp)
     step_match(verbose, source)
     step_export(verbose, source)
     step_visualize(verbose, source)
@@ -233,6 +278,7 @@ _STEPS = {
     "export": step_export,
     "visualize": step_visualize,
     "compare": step_compare,
+    "casualties": step_casualties,
     "all": step_all,
 }
 
@@ -266,6 +312,20 @@ def main() -> None:
         help="Fichier texte avec un code IRIS par ligne.",
     )
     parser.add_argument(
+        "--iris-shp",
+        default=None,
+        metavar="FILE",
+        help="Shapefile contenant les IRIS de la zone d'étude (colonne code_iris)."
+             " Utilisé avec --source iris. Évite le téléchargement IGN.",
+    )
+    parser.add_argument(
+        "--damage-csv",
+        default=None,
+        metavar="FILE",
+        help="CSV contenant ID et damage_level (D1..D5) des bâtiments endommagés. "
+             "Requis pour --step casualties.",
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Active les logs DEBUG.",
@@ -275,7 +335,14 @@ def main() -> None:
 
     step_fn = _STEPS[args.step]
     if args.step in ("load", "all"):
-        step_fn(verbose=args.verbose, source=args.source, iris_codes=iris_codes)
+        step_fn(
+            verbose=args.verbose,
+            source=args.source,
+            iris_codes=iris_codes,
+            args_iris_shp=args.iris_shp,
+        )
+    elif args.step == "casualties":
+        step_fn(verbose=args.verbose, source=args.source, damage_csv=args.damage_csv)
     else:
         step_fn(verbose=args.verbose, source=args.source)
 
