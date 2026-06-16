@@ -289,9 +289,21 @@ def step_env(verbose: bool = False, config_path: str = "config.yaml") -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     log.info("=== STEP env -> %s ===", out_dir)
 
+    # Source des contours : shapefile local si présent (évite le download France),
+    # sinon téléchargement IGN. URLs INSEE surchargées par la config si fournies.
+    contours_local = cfg.sources.get("contours_iris")
+    shp = str(contours_local) if contours_local and contours_local.exists() else None
+    iris_urls = {}
+    if cfg.contours_url:
+        iris_urls["contours_url"] = cfg.contours_url
+    if cfg.insee_pop_url:
+        iris_urls["pop_url"] = cfg.insee_pop_url
+    if cfg.insee_logement_url:
+        iris_urls["log_url"] = cfg.insee_logement_url
+
     # 1. Zone population (IRIS + INSEE)
     log.info("[1/6] Zone population (IRIS + INSEE)")
-    grid = load_iris(selector=cfg.population.selector)
+    grid = load_iris(selector=cfg.population.selector, shp_path=shp, **iris_urls)
     grid.to_file(out_dir / "population_iris.gpkg", driver="GPKG")
 
     # 2. Emprise région (évacuation, plus large que la population)
@@ -301,7 +313,11 @@ def step_env(verbose: bool = False, config_path: str = "config.yaml") -> None:
         if cfg.region.buffer_m > 0:
             region_fp = region_fp.buffer(cfg.region.buffer_m)
     else:
-        region_fp, _ = resolve_zone(selector=cfg.region.selector, buffer_m=cfg.region.buffer_m)
+        zone_urls = {"contours_url": cfg.contours_url} if cfg.contours_url else {}
+        region_fp, _ = resolve_zone(
+            selector=cfg.region.selector, shp_path=shp,
+            buffer_m=cfg.region.buffer_m, **zone_urls,
+        )
     region_gdf = gpd.GeoDataFrame(geometry=[region_fp], crs="EPSG:2154")
     region_gdf.to_file(out_dir / "region.gpkg", driver="GPKG")
     validate_subset(grid, region_fp)  # garde-fou population ⊆ région

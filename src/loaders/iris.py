@@ -149,11 +149,14 @@ def _match_mask(codes_series: pd.Series, selector: Selector):
     return codes_series.str.startswith(tuple(selector.codes))
 
 
-def _load_contours_raw(shp_path: "str | Path | None" = None) -> gpd.GeoDataFrame:
+def _load_contours_raw(
+    shp_path: "str | Path | None" = None,
+    contours_url: str = _CONTOURS_URL,
+) -> gpd.GeoDataFrame:
     """Charge les contours IRIS bruts : shapefile fourni, sinon téléchargement IGN.
 
-    Sans shp_path, télécharge/extrait CONTOURS-IRIS (France entière, Lambert-93).
-    Normalise CODE_IRIS en str (zéros de tête préservés pour le match par préfixe).
+    Sans shp_path, télécharge/extrait CONTOURS-IRIS (France entière, Lambert-93)
+    depuis contours_url. Normalise CODE_IRIS en str (zéros de tête préservés).
     """
     if shp_path is not None:
         gdf = gpd.read_file(Path(shp_path))
@@ -163,7 +166,7 @@ def _load_contours_raw(shp_path: "str | Path | None" = None) -> gpd.GeoDataFrame
             gdf = gdf.rename(columns={"code_iris": CODE_COL})
         logger.info("IRIS chargés depuis shapefile : %d IRIS", len(gdf))
     else:
-        archive = _download(_CONTOURS_URL, _CACHE_DIR / "contours-iris-2024.7z")
+        archive = _download(contours_url, _CACHE_DIR / "contours-iris-2024.7z")
         contours_shp = _extract_contours_7z(archive, _CACHE_DIR / "contours-iris-2024")
         gdf = gpd.read_file(contours_shp)
         logger.info("CONTOURS-IRIS chargés : %d IRIS (France entière)", len(gdf))
@@ -205,6 +208,7 @@ def resolve_zone(
     dep_code: str = _DEFAULT_DEP,
     shp_path: "str | Path | None" = None,
     buffer_m: float = 0.0,
+    contours_url: str = _CONTOURS_URL,
 ) -> "tuple[BaseGeometry, gpd.GeoDataFrame]":
     """Résout une zone en emprise unifiée (Lambert-93), SANS données INSEE.
 
@@ -216,17 +220,21 @@ def resolve_zone(
         selector:   Selector ou dict {type, codes}. Prioritaire si fourni.
         iris_codes: ancien style — équivaut à Selector("iris", iris_codes).
         dep_code:   ancien style — fallback Selector("departement", [dep_code]).
-        shp_path:   shapefile d'IRIS déjà découpé (aucun filtrage appliqué).
+        shp_path:   shapefile d'IRIS local. Filtré par le sélecteur s'il y en a
+                    un, sinon utilisé tel quel (toutes les lignes).
         buffer_m:   buffer en mètres sur l'emprise (réseau de bordure). Valide
                     en Lambert-93.
+        contours_url: URL de téléchargement CONTOURS-IRIS si pas de shp_path.
 
     Returns:
         (emprise, iris_gdf) : emprise = union (buffer optionnel) ; iris_gdf =
         géométrie par IRIS (SANS buffer), Lambert-93.
     """
-    gdf = _load_contours_raw(shp_path)
-    if shp_path is None:
-        sel = _coerce_selector(selector) or _selector_from_legacy(iris_codes, dep_code)
+    gdf = _load_contours_raw(shp_path, contours_url)
+    sel = _coerce_selector(selector)
+    if sel is None and shp_path is None:
+        sel = _selector_from_legacy(iris_codes, dep_code)
+    if sel is not None:
         gdf = _filter_contours(gdf, sel)
     if gdf.empty:
         raise ValueError("resolve_zone : aucune géométrie pour la zone demandée")
@@ -263,6 +271,9 @@ def load_iris(
     dep_code: str = _DEFAULT_DEP,
     shp_path: "str | Path | None" = None,
     selector: "Selector | dict | None" = None,
+    contours_url: str = _CONTOURS_URL,
+    pop_url: str = _POP_URL,
+    log_url: str = _LOG_URL,
 ) -> gpd.GeoDataFrame:
     """Load IRIS geometries + 2022 census population.
 
@@ -285,16 +296,18 @@ def load_iris(
     Returns:
         GeoDataFrame avec une ligne par IRIS.
     """
-    # 1. Contours IRIS (téléchargement France ou shapefile fourni), puis filtrage
-    gdf = _load_contours_raw(shp_path)
-    if shp_path is None:
-        sel = _coerce_selector(selector) or _selector_from_legacy(iris_codes, dep_code)
+    # 1. Contours IRIS (téléchargement France ou shapefile local), puis filtrage
+    gdf = _load_contours_raw(shp_path, contours_url)
+    sel = _coerce_selector(selector)
+    if sel is None and shp_path is None:
+        sel = _selector_from_legacy(iris_codes, dep_code)
+    if sel is not None:
         gdf = _filter_contours(gdf, sel)
 
     # 2. Population par IRIS (INSEE RP 2022) — filtrage CSV par département
     csv_dep = gdf["CODE_IRIS"].iloc[0][:2] if not gdf.empty else dep_code
-    pop = _load_csv_from_zip(_POP_URL, "base-ic-pop-2022.zip", csv_dep)
-    log = _load_csv_from_zip(_LOG_URL, "base-ic-logement-2022.zip", csv_dep)
+    pop = _load_csv_from_zip(pop_url, "base-ic-pop-2022.zip", csv_dep)
+    log = _load_csv_from_zip(log_url, "base-ic-logement-2022.zip", csv_dep)
 
     # 3. Fusion des tables statistiques
     _AGE_RAW = [

@@ -316,6 +316,20 @@ class TestResolveZone:
             with pytest.raises(ValueError):
                 resolve_zone(selector=Selector("departement", ("69",)))
 
+    def test_shp_path_with_selector_filters(self):
+        # shp local + sélecteur → on filtre le shp (zone population subset)
+        gdf = _make_iris_shp()
+        with patch("src.loaders.iris._load_contours_raw", return_value=gdf):
+            _, iris_gdf = resolve_zone(selector=Selector("iris", ("381230000",)), shp_path="dummy.shp")
+        assert len(iris_gdf) == 1
+
+    def test_shp_path_without_selector_uses_all(self):
+        # shp local sans sélecteur → toutes les lignes (zone region = shp entier)
+        gdf = _make_iris_shp()
+        with patch("src.loaders.iris._load_contours_raw", return_value=gdf):
+            _, iris_gdf = resolve_zone(shp_path="dummy.shp")
+        assert len(iris_gdf) == 2
+
 
 class TestValidateSubset:
     def test_inner_inside_outer_true(self):
@@ -344,3 +358,22 @@ class TestLoadIrisSelector:
             result = load_iris(selector={"type": "commune", "codes": ["38123"]})
         assert len(result) == 2
         assert "Ind_total" in result.columns
+
+    def test_custom_insee_urls_passed(self):
+        # les URLs INSEE de la config sont bien transmises au téléchargement
+        gdf = _make_iris_shp()
+        captured = []
+
+        def _fake_csv(url, cache_name, dep_code):
+            captured.append(url)
+            return pd.DataFrame({
+                "IRIS": ["381230000", "381231000"],
+                "P22_POP": [1, 1], "P22_PMEN": [1, 1], "P22_MEN": [1, 1],
+            })
+
+        with (
+            patch("src.loaders.iris._load_contours_raw", return_value=gdf),
+            patch("src.loaders.iris._load_csv_from_zip", side_effect=_fake_csv),
+        ):
+            load_iris(selector=Selector("departement", ("38",)), pop_url="POP", log_url="LOG")
+        assert captured == ["POP", "LOG"]

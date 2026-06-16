@@ -16,7 +16,8 @@ def allocate_population(joined: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     For each cell, buildings receive households proportionally to their NB_LOGTS.
     Integer rounding residuals are assigned to the building with the most logements.
 
-    Buildings outside any grid cell receive population = 0 and menages = 0.
+    Buildings outside the population grid receive population = 0 (expected: the
+    map/region is deliberately larger than the simulated-population zone).
 
     Args:
         joined: GeoDataFrame from spatial_join, with columns NB_LOGTS, Ind_total,
@@ -67,7 +68,11 @@ def allocate_population(joined: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
 
     n_outside = result["Ind_total"].isna().sum()
     if n_outside > 0:
-        logger.info("%d batiments hors carreau -> population = 0", n_outside)
+        logger.info(
+            "%d bâtiments hors zone population -> population = 0 "
+            "(attendu : carte/région plus grande que la zone simulée)",
+            n_outside,
+        )
 
     return result
 

@@ -42,6 +42,11 @@ class Config:
     output_dir: Path
     output_format: str
     raw: dict
+    # URLs des sources distantes (None = défauts codés dans les loaders).
+    # NB : liées au millésime 2022 (les noms de colonnes INSEE P22_/C22_ le sont aussi).
+    contours_url: "str | None" = None
+    insee_pop_url: "str | None" = None
+    insee_logement_url: "str | None" = None
 
 
 def _parse_zone(d: dict) -> ZoneConfig:
@@ -82,6 +87,8 @@ def load_config(path: "str | Path") -> Config:
     output = data.get("output") or {}
     output_dir = (base / output.get("dir", "./data/processed/env")).resolve()
 
+    datasets = data.get("datasets") or {}
+
     cfg = Config(
         crs=crs,
         sources=sources,
@@ -93,6 +100,9 @@ def load_config(path: "str | Path") -> Config:
         output_dir=output_dir,
         output_format=output.get("format", "gpkg"),
         raw=data,
+        contours_url=datasets.get("contours_iris_url"),
+        insee_pop_url=datasets.get("insee_pop_url"),
+        insee_logement_url=datasets.get("insee_logement_url"),
     )
     logger.info(
         "Config chargée : population=%s, region=%s(buffer=%.0fm), réseaux=%s",

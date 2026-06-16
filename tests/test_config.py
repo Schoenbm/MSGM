@@ -59,6 +59,40 @@ class TestLoadConfig:
         with pytest.raises(ValueError):
             load_config(_write(tmp_path, bad))
 
+    def test_region_with_own_selector(self, tmp_path):
+        text = (
+            'crs: "EPSG:2154"\n'
+            "zones:\n"
+            "  region:\n"
+            "    selector:\n"
+            "      type: iris\n"
+            '      codes: ["381850102", "381850103"]\n'
+            "    buffer_m: 300\n"
+            "  population:\n"
+            "    selector:\n"
+            "      type: iris\n"
+            '      codes: ["381850102"]\n'
+        )
+        cfg = load_config(_write(tmp_path, text))
+        assert cfg.region.selector.type == "iris"
+        assert cfg.region.buffer_m == 300.0
+        assert cfg.region.same_as is None
+
+    def test_datasets_urls_parsed(self, tmp_path):
+        text = _YAML + (
+            "datasets:\n"
+            '  insee_pop_url: "http://x/pop.zip"\n'
+            '  insee_logement_url: "http://x/log.zip"\n'
+        )
+        cfg = load_config(_write(tmp_path, text))
+        assert cfg.insee_pop_url == "http://x/pop.zip"
+        assert cfg.insee_logement_url == "http://x/log.zip"
+
+    def test_datasets_absent_gives_none(self, tmp_path):
+        cfg = load_config(_write(tmp_path, _YAML))
+        assert cfg.insee_pop_url is None
+        assert cfg.contours_url is None
+
     def test_region_defaults_to_population_when_absent(self, tmp_path):
         text = (
             'crs: "EPSG:2154"\n'
