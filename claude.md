@@ -1,100 +1,96 @@
-# PyPopulationGenerator — CLAUDE.md
+# env_generator — CLAUDE.md
 
 ## Objectif
-Distribuer la population des carreaux INSEE Filosofi aux bâtiments résidentiels
-de la métropole grenobloise, de façon proportionnelle au nombre de logements.
+Générer l'**environnement de simulation** de la métropole grenobloise pour le
+jumeau numérique / l'ABM d'évacuation : **réseau routier** (piéton + voiture),
+**bâtiments**, **population synthétique** localisée (âge + CSP).
+
+Module 1 de **MSGM** (`../`, Macro Sim of Grenoble Metro). Le modèle GAMA
+(simulateur) vit ailleurs et **consomme les sorties `.gpkg`** de ce module.
+
+**CRS unique partout : Lambert-93 (EPSG:2154).** Non négociable (DT + standard
+France). Tout loader doit retourner du 2154.
 
 ---
 
-## Structure du projet
+## Structure réelle
 
 ```
-grenoble-population/
-├── CLAUDE.md
-├── README.md
+env_generator/
+├── config.yaml                  # config du pipeline --step env (2 zones, URLs, réseau)
 ├── requirements.txt
-├── .gitignore             # inclure data/processed/ si fichiers volumineux
 ├── data/
-│   ├── batim_metro_grenoble.shp  (+ .dbf .prj .qmd .shx)
-│   ├── insee_metro_grenoble.shp  (+ .dbf .prj .qmd .shx)
-│   └── processed/                # sorties générées par le pipeline
+│   ├── contour_iris.shp         # IRIS du terrain (métropole) — 161 IRIS
+│   ├── batim_grenoble.shp       # BD TOPO bâti (USAGE1/2, NB_LOGTS, HAUTEUR)
+│   ├── insee_metro_grenoble.shp # carreaux Filosofi 200 m (Ind)
+│   ├── cache/                   # téléchargements IGN/INSEE (gitignored)
+│   └── processed/               # sorties (gitignored)
 ├── src/
-│   ├── main.py                   # point d'entrée CLI avec --step
+│   ├── main.py                  # CLI --step {load,match,export,visualize,compare,casualties,all,env}
+│   ├── config.py                # lecture config.yaml (Config, ZoneConfig)
 │   ├── loaders/
-│   │   ├── __init__.py
-│   │   ├── buildings.py          # charge batim + filtre résidentiel + estime NB_LOGTS
-│   │   └── insee.py              # charge carreaux + calcule Ind_total
+│   │   ├── iris.py              # CONTOURS-IRIS + INSEE RP 2022 ; Selector, resolve_zone, validate_subset
+│   │   ├── osm.py               # enrichissement bâtiments OSM (flats/levels) via Overpass
+│   │   ├── buildings.py         # BD TOPO : filtre résidentiel, NB_LOGTS, load_all_buildings
+│   │   ├── insee.py             # carreaux Filosofi (Ind_total)
+│   │   └── roads.py             # réseau routier OSM (osmnx, walk/drive) -> Lambert-93
 │   ├── matching/
-│   │   ├── __init__.py
-│   │   ├── spatial_join.py       # jointure centroïdes bâtiments ↔ carreaux
-│   │   └── allocator.py          # distribution proportionnelle ménages→logements
+│   │   ├── spatial_join.py      # centroïdes bâtiments ↔ grille (porte les colonnes âge/CSP)
+│   │   └── allocator.py         # allocation pop/ménages + âge/CSP (plus fort reste)
 │   ├── output/
-│   │   ├── __init__.py
-│   │   ├── export.py             # GeoJSON + CSV
-│   │   └── visualize.py          # carte Folium
-│   └── utils/
-│       ├── __init__.py
-│       └── logging_config.py
-└── tests/
-    └── test_allocator.py
+│   │   ├── export.py            # GeoJSON + CSV + Shapefile ; export_all_buildings
+│   │   ├── visualize.py         # carte
+│   │   ├── compare.py / compare_grid.py  # validation vs recensement
+│   │   └── casualties.py        # victimes/sans-abris depuis dommages D1..D5
+│   └── utils/logging_config.py
+└── tests/                       # pytest (~252 tests)
 ```
+
+> ⚠️ `loaders/osm.py` concerne les **bâtiments** (tags flats/levels), PAS le
+> réseau routier. Le réseau routier, c'est `loaders/roads.py` (osmnx).
 
 ---
 
-## Spécifications métier
+## Architecture du pipeline `--step env`
 
-### 1. Filtre résidentiel & estimation NB_LOGTS (`loaders/buildings.py`)
+Piloté par `config.yaml`, deux zones :
+- **population** : `load_iris(selector)` → IRIS + INSEE (âge, CSP, ménages).
+- **region** : `resolve_zone(selector, buffer_m)` → emprise géométrique seule
+  (terrain d'évacuation, plus large). `region same_as: population` possible.
 
-- **Champs d'usage** : `USAGE1` et `USAGE2` dans `batim_metro_grenoble.shp`
-  - Garder les bâtiments dont `USAGE1 == "Résidentiel"` (ou `USAGE2` si `USAGE1` absent/nul)
-- **NB_LOGTS** :
-  - Si la colonne `NB_LOGTS` existe et est non nulle → l'utiliser directement
-  - Sinon → estimer à partir de la surface au sol, de la hauteur du bâtiment et du
-    nombre de ménages restant à placer dans le carreau :
-    `NB_LOGTS_estimé = floor(surface × nb_étages / surface_moy_logement)`
-    où `nb_étages = max(1, round(hauteur / 3.0))` et
-    `surface_moy_logement` est calibrée dynamiquement sur le carreau
-    (pop_carreau / logements_connus si disponible, sinon 65 m² par défaut).
+Enchaînement (`step_env`) : population → région → `validate_subset` (garde-fou
+`population ⊆ region`) → `fetch_road_network` (walk + drive) → bâtiments BD TOPO
+filtrés sur la région + enrichissement OSM → `allocate_population` → export.
 
-### 2. Population INSEE (`loaders/insee.py`)
-
-- **Champ de population** : `Ind` dans `insee_metro_grenoble.shp` → utiliser directement
-  - Fallback : si `Ind` manquant, faire la somme des colonnes de population disponibles
-- **Exclusion de carreaux** : exclure uniquement les carreaux qui ne contiennent
-  **aucun bâtiment résidentiel** après jointure spatiale (pas de filtre sur Ind=0)
-
-### 3. Algorithme d'allocation (`matching/allocator.py`)
-
-**Ordre des opérations :**
-1. Estimer `NB_LOGTS` pour tous les bâtiments (cf. §1) **avant** l'allocation
-2. Jointure spatiale : centroïde de chaque bâtiment → carreau INSEE contenant
-
-**Distribution :**
-- Pour chaque carreau, distribuer `Ind` (population) aux bâtiments proportionnellement
-  à leur `NB_LOGTS` :
-  `pop_bâtiment = round(Ind_carreau × NB_LOGTS_bât / sum(NB_LOGTS_carreau))`
-- Résultat : **entier arrondi** — ajustement du résidu sur le bâtiment le plus grand
-  pour que `sum(pop_bâtiments) == Ind_carreau` exactement
-- Bâtiments hors carreau (centroïde en dehors de toute maille) → population = 0,
-  logguer un avertissement
+La carte (région) plus grande que la zone peuplée est une **feature** voulue :
+les bâtiments hors zone population reçoivent `population = 0` (attendu, pas une
+erreur).
 
 ---
 
-## Pipeline CLI (`src/main.py`)
+## Décisions de conception à respecter
 
-```
-python src/main.py --step all        # pipeline complet
-python src/main.py --step load       # chargement + filtre
-python src/main.py --step match      # jointure + allocation
-python src/main.py --step export     # GeoJSON/CSV
-python src/main.py --step visualize  # carte Folium
-```
+- **Source unique pour les IRIS.** Si le shapefile local ne couvre pas tous les
+  codes demandés : `on_missing="error"` (défaut, lève `MissingIrisError`) ou
+  `"download"` (rebascule **entièrement** sur l'IGN France). **Jamais** de fusion
+  local + download (millésimes d'IRIS incompatibles → chevauchements/trous).
+- **Confirmation côté CLI uniquement.** Les loaders ne font pas d'`input()` :
+  `step_env` attrape `MissingIrisError`, demande confirmation (ou `--yes`),
+  refuse en non-interactif. Garder cette séparation (bibliothèque réutilisable).
+- **Sélecteur multi-niveaux** (`iris|commune|departement`) résolu par préfixe du
+  `CODE_IRIS` sur une seule source.
+- **Millésime 2022 couplé au code** : URLs paramétrables (config `datasets`), mais
+  noms de colonnes INSEE (`P22_*`, `C22_*`) en dur dans `iris.py`. Le documenter,
+  ne pas prétendre l'inverse.
 
 ---
 
-## Conventions de code
+## Conventions
 
-- Python ≥ 3.10
-- Type hints sur toutes les fonctions publiques
-- Logging via `utils/logging_config.py` (niveau INFO par défaut, DEBUG avec `--verbose`)
-- Pas de notebooks dans le dépôt — tout passe par le CLI
+- Python ≥ 3.10, type hints sur l'API publique.
+- Logging via `utils/logging_config.py` (INFO par défaut, DEBUG avec `--verbose`).
+- Tout passe par le CLI (`python -m src.main`), pas de notebooks dans le dépôt.
+- **Tester avant de committer** : `python -m pytest -q` doit rester vert. Les
+  loaders réseau (osmnx/overpy) sont mockés dans les tests — pour la correctness
+  réelle, faire un smoke test sur une petite emprise.
+- Commits : messages clairs, ne committer que sur demande.
