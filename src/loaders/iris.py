@@ -41,6 +41,17 @@ CODE_COL = "CODE_IRIS"        # colonne identifiant dans CONTOURS-IRIS
 VALID_TYPES = {"iris", "commune", "departement"}
 
 
+class MissingIrisError(ValueError):
+    """Codes IRIS demandés absents du shapefile local (sélecteur iris)."""
+
+    def __init__(self, missing):
+        self.missing = sorted(missing)
+        super().__init__(
+            f"{len(self.missing)} code(s) IRIS absent(s) du shapefile local : "
+            f"{self.missing}"
+        )
+
+
 # ── Download / cache ──────────────────────────────────────────────────────────
 
 def _download(url: str, dest: Path) -> Path:
@@ -201,6 +212,42 @@ def _ensure_crs(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     return gdf
 
 
+def _resolve_geometry(
+    selector: "Selector | None",
+    shp_path: "str | Path | None",
+    contours_url: str,
+    on_missing: str,
+) -> gpd.GeoDataFrame:
+    """Charge les contours filtrés par le sélecteur, **source unique**.
+
+    - Sans shp_path : téléchargement France + filtrage.
+    - Avec shp_path : on filtre le shapefile local. Si le sélecteur est de type
+      'iris' et que des codes manquent dans le local :
+        * on_missing='error'    → lève MissingIrisError (codes manquants listés) ;
+        * on_missing='download' → bascule ENTIÈREMENT sur le download France
+          (jamais de fusion local+download : une seule édition d'IRIS par run).
+    """
+    if shp_path is None:
+        gdf = _load_contours_raw(None, contours_url)
+        return _filter_contours(gdf, selector) if selector is not None else gdf
+
+    local = _load_contours_raw(shp_path)
+    filtered = _filter_contours(local, selector) if selector is not None else local
+
+    if selector is not None and selector.type == "iris":
+        missing = set(selector.codes) - set(filtered[CODE_COL])
+        if missing:
+            if on_missing == "download":
+                logger.warning(
+                    "%d code(s) absent(s) du shapefile local %s → bascule sur le "
+                    "téléchargement France (source unique)", len(missing), sorted(missing),
+                )
+                gdf = _load_contours_raw(None, contours_url)
+                return _filter_contours(gdf, selector)
+            raise MissingIrisError(missing)
+    return filtered
+
+
 def resolve_zone(
     selector: "Selector | dict | None" = None,
     *,
@@ -209,6 +256,7 @@ def resolve_zone(
     shp_path: "str | Path | None" = None,
     buffer_m: float = 0.0,
     contours_url: str = _CONTOURS_URL,
+    on_missing: str = "error",
 ) -> "tuple[BaseGeometry, gpd.GeoDataFrame]":
     """Résout une zone en emprise unifiée (Lambert-93), SANS données INSEE.
 
@@ -230,12 +278,10 @@ def resolve_zone(
         (emprise, iris_gdf) : emprise = union (buffer optionnel) ; iris_gdf =
         géométrie par IRIS (SANS buffer), Lambert-93.
     """
-    gdf = _load_contours_raw(shp_path, contours_url)
     sel = _coerce_selector(selector)
     if sel is None and shp_path is None:
         sel = _selector_from_legacy(iris_codes, dep_code)
-    if sel is not None:
-        gdf = _filter_contours(gdf, sel)
+    gdf = _resolve_geometry(sel, shp_path, contours_url, on_missing)
     if gdf.empty:
         raise ValueError("resolve_zone : aucune géométrie pour la zone demandée")
     gdf = _ensure_crs(gdf).reset_index(drop=True)
@@ -274,6 +320,7 @@ def load_iris(
     contours_url: str = _CONTOURS_URL,
     pop_url: str = _POP_URL,
     log_url: str = _LOG_URL,
+    on_missing: str = "error",
 ) -> gpd.GeoDataFrame:
     """Load IRIS geometries + 2022 census population.
 
@@ -296,13 +343,11 @@ def load_iris(
     Returns:
         GeoDataFrame avec une ligne par IRIS.
     """
-    # 1. Contours IRIS (téléchargement France ou shapefile local), puis filtrage
-    gdf = _load_contours_raw(shp_path, contours_url)
+    # 1. Contours IRIS (source unique : shapefile local OU download France)
     sel = _coerce_selector(selector)
     if sel is None and shp_path is None:
         sel = _selector_from_legacy(iris_codes, dep_code)
-    if sel is not None:
-        gdf = _filter_contours(gdf, sel)
+    gdf = _resolve_geometry(sel, shp_path, contours_url, on_missing)
 
     # 2. Population par IRIS (INSEE RP 2022) — filtrage CSV par département
     csv_dep = gdf["CODE_IRIS"].iloc[0][:2] if not gdf.empty else dep_code

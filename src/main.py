@@ -261,7 +261,28 @@ def step_all(
     step_visualize(verbose, source)
 
 
-def step_env(verbose: bool = False, config_path: str = "config.yaml") -> None:
+def _confirm_iris_download(missing: list, assume_yes: bool) -> bool:
+    """Demande confirmation avant de basculer sur le téléchargement IGN.
+
+    --yes (assume_yes) → True sans prompt. Non interactif sans --yes → False
+    (jamais de download silencieux). Sinon, prompt y/N.
+    """
+    head = sorted(missing)[:10]
+    suffix = " ..." if len(missing) > 10 else ""
+    print(f"[IRIS] {len(missing)} code(s) absent(s) du shapefile local : {head}{suffix}",
+          file=sys.stderr)
+    if assume_yes:
+        print("[IRIS] --yes : téléchargement IGN (source France) autorisé.", file=sys.stderr)
+        return True
+    if not sys.stdin.isatty():
+        print("[IRIS] Mode non interactif. Relancez avec --yes pour autoriser le "
+              "téléchargement, ou corrigez les codes.", file=sys.stderr)
+        return False
+    resp = input("[IRIS] Télécharger ces IRIS depuis l'IGN (France entière) ? [y/N] ")
+    return resp.strip().lower() in ("y", "yes", "o", "oui")
+
+
+def step_env(verbose: bool = False, config_path: str = "config.yaml", assume_yes: bool = False) -> None:
     """Pipeline complet piloté par config.yaml.
 
     Enchaîne : zone population (IRIS + INSEE) → emprise région (évacuation) →
@@ -276,7 +297,7 @@ def step_env(verbose: bool = False, config_path: str = "config.yaml") -> None:
     from shapely.ops import unary_union
 
     from src.config import load_config
-    from src.loaders.iris import load_iris, resolve_zone, validate_subset
+    from src.loaders.iris import load_iris, resolve_zone, validate_subset, MissingIrisError
     from src.loaders.roads import fetch_road_network
     from src.loaders.osm import fetch_osm_buildings
     from src.loaders.buildings import load_buildings, load_all_buildings
@@ -303,7 +324,15 @@ def step_env(verbose: bool = False, config_path: str = "config.yaml") -> None:
 
     # 1. Zone population (IRIS + INSEE)
     log.info("[1/6] Zone population (IRIS + INSEE)")
-    grid = load_iris(selector=cfg.population.selector, shp_path=shp, **iris_urls)
+    try:
+        grid = load_iris(selector=cfg.population.selector, shp_path=shp,
+                         on_missing="error", **iris_urls)
+    except MissingIrisError as e:
+        if not _confirm_iris_download(e.missing, assume_yes):
+            log.error("Abandon : codes IRIS population absents du shapefile local.")
+            return
+        grid = load_iris(selector=cfg.population.selector, shp_path=shp,
+                         on_missing="download", **iris_urls)
     grid.to_file(out_dir / "population_iris.gpkg", driver="GPKG")
 
     # 2. Emprise région (évacuation, plus large que la population)
@@ -314,10 +343,19 @@ def step_env(verbose: bool = False, config_path: str = "config.yaml") -> None:
             region_fp = region_fp.buffer(cfg.region.buffer_m)
     else:
         zone_urls = {"contours_url": cfg.contours_url} if cfg.contours_url else {}
-        region_fp, _ = resolve_zone(
-            selector=cfg.region.selector, shp_path=shp,
-            buffer_m=cfg.region.buffer_m, **zone_urls,
-        )
+        try:
+            region_fp, _ = resolve_zone(
+                selector=cfg.region.selector, shp_path=shp,
+                buffer_m=cfg.region.buffer_m, on_missing="error", **zone_urls,
+            )
+        except MissingIrisError as e:
+            if not _confirm_iris_download(e.missing, assume_yes):
+                log.error("Abandon : codes IRIS région absents du shapefile local.")
+                return
+            region_fp, _ = resolve_zone(
+                selector=cfg.region.selector, shp_path=shp,
+                buffer_m=cfg.region.buffer_m, on_missing="download", **zone_urls,
+            )
     region_gdf = gpd.GeoDataFrame(geometry=[region_fp], crs="EPSG:2154")
     region_gdf.to_file(out_dir / "region.gpkg", driver="GPKG")
     validate_subset(grid, region_fp)  # garde-fou population ⊆ région
@@ -436,6 +474,12 @@ def main() -> None:
         help="Fichier de configuration YAML pour --step env (default: config.yaml).",
     )
     parser.add_argument(
+        "--yes", "-y",
+        action="store_true",
+        help="Autorise sans prompt le téléchargement IGN si des IRIS manquent du "
+             "shapefile local (--step env).",
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Active les logs DEBUG.",
@@ -454,7 +498,7 @@ def main() -> None:
     elif args.step == "casualties":
         step_fn(verbose=args.verbose, source=args.source, damage_csv=args.damage_csv)
     elif args.step == "env":
-        step_fn(verbose=args.verbose, config_path=args.config)
+        step_fn(verbose=args.verbose, config_path=args.config, assume_yes=args.yes)
     else:
         step_fn(verbose=args.verbose, source=args.source)
 

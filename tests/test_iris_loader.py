@@ -245,11 +245,58 @@ class TestLoadIris:
 from shapely.geometry import box as _box  # noqa: E402
 from src.loaders.iris import (  # noqa: E402
     Selector,
+    MissingIrisError,
     resolve_zone,
     validate_subset,
     _filter_contours,
     _selector_from_legacy,
+    _resolve_geometry,
 )
+
+
+def _make_france_with_999() -> gpd.GeoDataFrame:
+    polys = [Polygon([(0, 0), (1, 0), (1, 1), (0, 1)]),
+             Polygon([(2, 0), (3, 0), (3, 1), (2, 1)])]
+    return gpd.GeoDataFrame(
+        {"CODE_IRIS": ["381230000", "999999999"], "geometry": polys},
+        crs="EPSG:2154",
+    )
+
+
+class TestResolveGeometryFallback:
+    """Source unique : local complet → local ; local incomplet → error|download."""
+
+    def test_error_when_local_incomplete(self):
+        local = _make_iris_shp()  # 381230000, 381231000 (pas 999999999)
+        sel = Selector("iris", ("381230000", "999999999"))
+        with patch("src.loaders.iris._load_contours_raw", return_value=local):
+            with pytest.raises(MissingIrisError) as exc:
+                _resolve_geometry(sel, "dummy.shp", "URL", "error")
+        assert "999999999" in exc.value.missing
+
+    def test_download_fallback_when_incomplete(self):
+        local = _make_iris_shp()              # 1er appel (local) — incomplet
+        france = _make_france_with_999()      # 2e appel (download) — complet
+        sel = Selector("iris", ("381230000", "999999999"))
+        with patch("src.loaders.iris._load_contours_raw", side_effect=[local, france]):
+            out = _resolve_geometry(sel, "dummy.shp", "URL", "download")
+        assert set(out["CODE_IRIS"]) == {"381230000", "999999999"}
+
+    def test_local_complete_uses_local(self):
+        local = _make_iris_shp()
+        sel = Selector("iris", ("381230000", "381231000"))
+        with patch("src.loaders.iris._load_contours_raw", return_value=local) as m:
+            out = _resolve_geometry(sel, "dummy.shp", "URL", "error")
+        assert len(out) == 2
+        assert m.call_count == 1  # pas de download
+
+    def test_no_shp_does_not_raise(self):
+        # sans shp local, on est en mode download : codes manquants juste warn
+        france = _make_iris_shp()
+        sel = Selector("iris", ("381230000", "999999999"))
+        with patch("src.loaders.iris._load_contours_raw", return_value=france):
+            out = _resolve_geometry(sel, None, "URL", "error")
+        assert len(out) == 1
 
 
 class TestSelector:
