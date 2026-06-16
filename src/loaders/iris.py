@@ -11,6 +11,9 @@ from pathlib import Path
 import geopandas as gpd
 import pandas as pd
 import requests
+from dataclasses import dataclass
+from shapely.geometry.base import BaseGeometry
+from shapely.ops import unary_union
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +35,10 @@ _LOG_URL = (
 _CACHE_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "cache"
 _DEFAULT_DEP = "38"           # Isère
 _TAILLE_MEN_DEFAUT = 2.3      # moyenne nationale de secours
+
+TARGET_CRS = "EPSG:2154"      # Lambert-93, imposé (DT + standard France)
+CODE_COL = "CODE_IRIS"        # colonne identifiant dans CONTOURS-IRIS
+VALID_TYPES = {"iris", "commune", "departement"}
 
 
 # ── Download / cache ──────────────────────────────────────────────────────────
@@ -98,12 +105,164 @@ def _load_csv_from_zip(url: str, cache_name: str, dep_code: str) -> pd.DataFrame
     return df
 
 
+# ── Résolution de zone (sélecteur multi-niveaux) ──────────────────────────────
+# Les trois niveaux se résolvent sur la MÊME source (CONTOURS-IRIS), par préfixe
+# du CODE_IRIS (9 chiffres = commune[5] + suffixe[4] ; commune[5] = dept[2-3]+...) :
+#   - iris        : CODE_IRIS ∈ codes
+#   - commune     : CODE_IRIS commence par un code commune  (5 chiffres)
+#   - departement : CODE_IRIS commence par un code dept     (2-3 chiffres)
+
+@dataclass(frozen=True)
+class Selector:
+    """Sélecteur de zone : un niveau administratif + une liste de codes INSEE."""
+    type: str
+    codes: tuple[str, ...]
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Selector":
+        t = str(d["type"]).strip().lower()
+        if t not in VALID_TYPES:
+            raise ValueError(f"type de sélecteur inconnu : {t!r} (attendu {VALID_TYPES})")
+        codes = tuple(str(c).strip() for c in d.get("codes", []))
+        if not codes:
+            raise ValueError(f"sélecteur '{t}' sans code")
+        return cls(type=t, codes=codes)
+
+
+def _selector_from_legacy(iris_codes: "list[str] | None", dep_code: str) -> Selector:
+    """Reconstruit un Selector depuis les anciens paramètres iris_codes / dep_code."""
+    if iris_codes:
+        return Selector("iris", tuple(str(c).strip() for c in iris_codes))
+    return Selector("departement", (str(dep_code).strip(),))
+
+
+def _coerce_selector(selector: "Selector | dict | None") -> "Selector | None":
+    if selector is None or isinstance(selector, Selector):
+        return selector
+    return Selector.from_dict(selector)
+
+
+def _match_mask(codes_series: pd.Series, selector: Selector):
+    if selector.type == "iris":
+        return codes_series.isin(set(selector.codes))
+    # commune / departement → match par préfixe (str.startswith accepte un tuple)
+    return codes_series.str.startswith(tuple(selector.codes))
+
+
+def _load_contours_raw(shp_path: "str | Path | None" = None) -> gpd.GeoDataFrame:
+    """Charge les contours IRIS bruts : shapefile fourni, sinon téléchargement IGN.
+
+    Sans shp_path, télécharge/extrait CONTOURS-IRIS (France entière, Lambert-93).
+    Normalise CODE_IRIS en str (zéros de tête préservés pour le match par préfixe).
+    """
+    if shp_path is not None:
+        gdf = gpd.read_file(Path(shp_path))
+        if "fid" in gdf.columns:
+            gdf = gdf.drop(columns=["fid"])
+        if "code_iris" in gdf.columns and CODE_COL not in gdf.columns:
+            gdf = gdf.rename(columns={"code_iris": CODE_COL})
+        logger.info("IRIS chargés depuis shapefile : %d IRIS", len(gdf))
+    else:
+        archive = _download(_CONTOURS_URL, _CACHE_DIR / "contours-iris-2024.7z")
+        contours_shp = _extract_contours_7z(archive, _CACHE_DIR / "contours-iris-2024")
+        gdf = gpd.read_file(contours_shp)
+        logger.info("CONTOURS-IRIS chargés : %d IRIS (France entière)", len(gdf))
+    if CODE_COL in gdf.columns:
+        gdf[CODE_COL] = gdf[CODE_COL].astype(str).str.strip()
+    return gdf
+
+
+def _filter_contours(gdf: gpd.GeoDataFrame, selector: Selector) -> gpd.GeoDataFrame:
+    """Filtre les contours selon le sélecteur. Tolérant : warn + vide si rien."""
+    selected = gdf.loc[_match_mask(gdf[CODE_COL], selector)].copy()
+    if selected.empty:
+        logger.warning("Aucun IRIS pour le sélecteur %s=%s", selector.type, selector.codes)
+        return selected
+    if selector.type == "iris":
+        missing = set(selector.codes) - set(selected[CODE_COL])
+        if missing:
+            logger.warning("Codes IRIS sans correspondance : %s", sorted(missing))
+    else:
+        for code in selector.codes:
+            if not selected[CODE_COL].str.startswith(code).any():
+                logger.warning("Code %s (%s) sans IRIS correspondant", code, selector.type)
+    logger.info("%d IRIS retenus (%s=%s)", len(selected), selector.type, selector.codes)
+    return selected
+
+
+def _ensure_crs(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    if gdf.crs is None:
+        raise ValueError("Contours IRIS sans CRS défini — fichier suspect")
+    if gdf.crs.to_string() != TARGET_CRS:
+        gdf = gdf.to_crs(TARGET_CRS)
+    return gdf
+
+
+def resolve_zone(
+    selector: "Selector | dict | None" = None,
+    *,
+    iris_codes: "list[str] | None" = None,
+    dep_code: str = _DEFAULT_DEP,
+    shp_path: "str | Path | None" = None,
+    buffer_m: float = 0.0,
+) -> "tuple[BaseGeometry, gpd.GeoDataFrame]":
+    """Résout une zone en emprise unifiée (Lambert-93), SANS données INSEE.
+
+    Sert à définir la zone *region* (emprise d'évacuation) : seule la géométrie
+    compte, pas la population. Pour la zone *population* (avec INSEE), utiliser
+    ``load_iris``.
+
+    Args:
+        selector:   Selector ou dict {type, codes}. Prioritaire si fourni.
+        iris_codes: ancien style — équivaut à Selector("iris", iris_codes).
+        dep_code:   ancien style — fallback Selector("departement", [dep_code]).
+        shp_path:   shapefile d'IRIS déjà découpé (aucun filtrage appliqué).
+        buffer_m:   buffer en mètres sur l'emprise (réseau de bordure). Valide
+                    en Lambert-93.
+
+    Returns:
+        (emprise, iris_gdf) : emprise = union (buffer optionnel) ; iris_gdf =
+        géométrie par IRIS (SANS buffer), Lambert-93.
+    """
+    gdf = _load_contours_raw(shp_path)
+    if shp_path is None:
+        sel = _coerce_selector(selector) or _selector_from_legacy(iris_codes, dep_code)
+        gdf = _filter_contours(gdf, sel)
+    if gdf.empty:
+        raise ValueError("resolve_zone : aucune géométrie pour la zone demandée")
+    gdf = _ensure_crs(gdf).reset_index(drop=True)
+    footprint = unary_union(gdf.geometry.values)
+    if buffer_m and buffer_m > 0:
+        footprint = footprint.buffer(buffer_m)     # mètres : valide en Lambert-93
+        logger.info("Buffer de %.0f m appliqué à l'emprise", buffer_m)
+    return footprint, gdf
+
+
+def validate_subset(
+    inner: gpd.GeoDataFrame,
+    outer_footprint: BaseGeometry,
+    name_inner: str = "population",
+    name_outer: str = "region",
+) -> bool:
+    """Vérifie population ⊆ region. Tolérant : log + False si débordement."""
+    inner_fp = unary_union(inner.geometry.values)
+    if outer_footprint.covers(inner_fp):
+        return True
+    overflow = inner_fp.difference(outer_footprint).area
+    logger.warning(
+        "%s déborde de %s (≈ %.0f m² hors emprise) — vérifier les codes",
+        name_inner, name_outer, overflow,
+    )
+    return False
+
+
 # ── Public loader ─────────────────────────────────────────────────────────────
 
 def load_iris(
     iris_codes: list[str] | None = None,
     dep_code: str = _DEFAULT_DEP,
     shp_path: "str | Path | None" = None,
+    selector: "Selector | dict | None" = None,
 ) -> gpd.GeoDataFrame:
     """Load IRIS geometries + 2022 census population.
 
@@ -119,35 +278,18 @@ def load_iris(
         dep_code:   Code département de secours si ni iris_codes ni shp_path fournis.
         shp_path:   Shapefile utilisateur contenant les IRIS (colonne code_iris ou
                     CODE_IRIS). Si fourni, évite le téléchargement IGN.
+        selector:   Selector ou dict {type, codes} — sélecteur multi-niveaux
+                    (iris | commune | departement). Prioritaire sur iris_codes /
+                    dep_code s'il est fourni.
 
     Returns:
         GeoDataFrame avec une ligne par IRIS.
     """
-    # 1. Contours IRIS
-    if shp_path is not None:
-        gdf = gpd.read_file(Path(shp_path))
-        # Drop fid column that conflicts with GeoPackage format
-        if "fid" in gdf.columns:
-            gdf = gdf.drop(columns=["fid"])
-        # Normaliser la casse de la colonne code IRIS
-        if "code_iris" in gdf.columns and "CODE_IRIS" not in gdf.columns:
-            gdf = gdf.rename(columns={"code_iris": "CODE_IRIS"})
-        logger.info("IRIS chargés depuis shapefile : %d IRIS", len(gdf))
-    else:
-        archive = _download(_CONTOURS_URL, _CACHE_DIR / "contours-iris-2024.7z")
-        contours_shp = _extract_contours_7z(archive, _CACHE_DIR / "contours-iris-2024")
-        gdf = gpd.read_file(contours_shp)
-        logger.info("CONTOURS-IRIS chargés : %d IRIS (France entière)", len(gdf))
-
-        if iris_codes:
-            gdf = gdf[gdf["CODE_IRIS"].isin(iris_codes)].copy()
-            logger.info("Filtré sur %d codes IRIS : %d trouvés", len(iris_codes), len(gdf))
-            if len(gdf) < len(iris_codes):
-                missing = set(iris_codes) - set(gdf["CODE_IRIS"])
-                logger.warning("%d codes IRIS non trouvés : %s", len(missing), sorted(missing))
-        else:
-            gdf = gdf[gdf["CODE_IRIS"].str.startswith(dep_code)].copy()
-            logger.info("Filtré dept %s : %d IRIS", dep_code, len(gdf))
+    # 1. Contours IRIS (téléchargement France ou shapefile fourni), puis filtrage
+    gdf = _load_contours_raw(shp_path)
+    if shp_path is None:
+        sel = _coerce_selector(selector) or _selector_from_legacy(iris_codes, dep_code)
+        gdf = _filter_contours(gdf, sel)
 
     # 2. Population par IRIS (INSEE RP 2022) — filtrage CSV par département
     csv_dep = gdf["CODE_IRIS"].iloc[0][:2] if not gdf.empty else dep_code

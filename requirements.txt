@@ -7,4 +7,6 @@ matplotlib>=3.8
 contextily>=1.4
 requests>=2.31
 overpy>=0.7
+osmnx>=1.9
 py7zr>=0.20
+PyYAML>=6.0

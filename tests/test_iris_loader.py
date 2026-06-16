@@ -238,3 +238,109 @@ class TestLoadIris:
             result = load_iris(dep_code="38")
         assert isinstance(result, gpd.GeoDataFrame)
         assert result.crs is not None
+
+
+# ── Sélecteur multi-niveaux (fusion ex-zone.py) ───────────────────────────────
+
+from shapely.geometry import box as _box  # noqa: E402
+from src.loaders.iris import (  # noqa: E402
+    Selector,
+    resolve_zone,
+    validate_subset,
+    _filter_contours,
+    _selector_from_legacy,
+)
+
+
+class TestSelector:
+    def test_from_dict_valid(self):
+        sel = Selector.from_dict({"type": "commune", "codes": ["38185", "38151"]})
+        assert sel.type == "commune"
+        assert sel.codes == ("38185", "38151")
+
+    def test_from_dict_unknown_type(self):
+        with pytest.raises(ValueError):
+            Selector.from_dict({"type": "canton", "codes": ["38"]})
+
+    def test_from_dict_empty_codes(self):
+        with pytest.raises(ValueError):
+            Selector.from_dict({"type": "iris", "codes": []})
+
+    def test_legacy_iris_codes(self):
+        assert _selector_from_legacy(["381230000"], "38") == Selector("iris", ("381230000",))
+
+    def test_legacy_dep_fallback(self):
+        assert _selector_from_legacy(None, "38") == Selector("departement", ("38",))
+
+
+class TestFilterContours:
+    def test_iris_exact(self):
+        gdf = _make_iris_shp()
+        out = _filter_contours(gdf, Selector("iris", ("381230000",)))
+        assert list(out["CODE_IRIS"]) == ["381230000"]
+
+    def test_commune_prefix(self):
+        gdf = _make_iris_shp()
+        out = _filter_contours(gdf, Selector("commune", ("38123",)))
+        assert len(out) == 2  # les deux IRIS de la commune 38123
+
+    def test_departement_prefix(self):
+        gdf = _make_iris_shp()
+        out = _filter_contours(gdf, Selector("departement", ("38",)))
+        assert len(out) == 2
+
+    def test_no_match_returns_empty(self):
+        gdf = _make_iris_shp()
+        out = _filter_contours(gdf, Selector("departement", ("69",)))
+        assert out.empty
+
+
+class TestResolveZone:
+    def test_footprint_unions_iris(self, tmp_path):
+        gdf = _make_iris_shp()
+        with patch("src.loaders.iris._load_contours_raw", return_value=gdf):
+            footprint, iris_gdf = resolve_zone(selector={"type": "commune", "codes": ["38123"]})
+        assert len(iris_gdf) == 2
+        assert abs(footprint.area - 2.0) < 1e-9  # deux carrés unitaires accolés
+
+    def test_buffer_increases_area(self):
+        gdf = _make_iris_shp()
+        with patch("src.loaders.iris._load_contours_raw", return_value=gdf):
+            base, _ = resolve_zone(selector=Selector("departement", ("38",)))
+            buffered, _ = resolve_zone(selector=Selector("departement", ("38",)), buffer_m=0.5)
+        assert buffered.area > base.area
+
+    def test_empty_zone_raises(self):
+        gdf = _make_iris_shp()
+        with patch("src.loaders.iris._load_contours_raw", return_value=gdf):
+            with pytest.raises(ValueError):
+                resolve_zone(selector=Selector("departement", ("69",)))
+
+
+class TestValidateSubset:
+    def test_inner_inside_outer_true(self):
+        outer = _box(0, 0, 10, 10)
+        inner = gpd.GeoDataFrame(geometry=[_box(1, 1, 2, 2)], crs="EPSG:2154")
+        assert validate_subset(inner, outer) is True
+
+    def test_inner_outside_outer_false(self):
+        outer = _box(0, 0, 1, 1)
+        inner = gpd.GeoDataFrame(geometry=[_box(5, 5, 6, 6)], crs="EPSG:2154")
+        assert validate_subset(inner, outer) is False
+
+
+class TestLoadIrisSelector:
+    def test_selector_dict_commune(self, tmp_path):
+        iris_shp = _make_iris_shp()
+        pop_zip = tmp_path / "pop.zip"
+        pop_zip.write_bytes(_zip_bytes("pop.csv", _make_pop_csv()))
+        log_zip = tmp_path / "log.zip"
+        log_zip.write_bytes(_zip_bytes("log.csv", _make_log_csv()))
+        with (
+            patch("src.loaders.iris._download", side_effect=[tmp_path / "fake.7z", pop_zip, log_zip]),
+            patch("src.loaders.iris._extract_contours_7z", return_value="unused"),
+            patch("src.loaders.iris.gpd.read_file", return_value=iris_shp),
+        ):
+            result = load_iris(selector={"type": "commune", "codes": ["38123"]})
+        assert len(result) == 2
+        assert "Ind_total" in result.columns
