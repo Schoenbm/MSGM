@@ -261,6 +261,80 @@ def step_all(
     step_visualize(verbose, source)
 
 
+def step_env(verbose: bool = False, config_path: str = "config.yaml") -> None:
+    """Pipeline complet piloté par config.yaml.
+
+    Enchaîne : zone population (IRIS + INSEE) → emprise région (évacuation) →
+    réseau routier (walk/drive) → bâtiments (BD TOPO + OSM) → allocation de
+    population → export, le tout dans output.dir pour consommation par GAMA.
+    """
+    import logging
+    _setup_logging(verbose)
+    log = logging.getLogger(__name__)
+
+    import geopandas as gpd
+    from shapely.ops import unary_union
+
+    from src.config import load_config
+    from src.loaders.iris import load_iris, resolve_zone, validate_subset
+    from src.loaders.roads import fetch_road_network
+    from src.loaders.osm import fetch_osm_buildings
+    from src.loaders.buildings import load_buildings, load_all_buildings
+    from src.matching.spatial_join import join_buildings_to_insee
+    from src.matching.allocator import allocate_population
+    from src.output.export import export_results, export_all_buildings
+
+    cfg = load_config(config_path)
+    out_dir = cfg.output_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+    log.info("=== STEP env -> %s ===", out_dir)
+
+    # 1. Zone population (IRIS + INSEE)
+    log.info("[1/6] Zone population (IRIS + INSEE)")
+    grid = load_iris(selector=cfg.population.selector)
+    grid.to_file(out_dir / "population_iris.gpkg", driver="GPKG")
+
+    # 2. Emprise région (évacuation, plus large que la population)
+    log.info("[2/6] Emprise région")
+    if cfg.region.same_as == "population":
+        region_fp = unary_union(grid.geometry.values)
+        if cfg.region.buffer_m > 0:
+            region_fp = region_fp.buffer(cfg.region.buffer_m)
+    else:
+        region_fp, _ = resolve_zone(selector=cfg.region.selector, buffer_m=cfg.region.buffer_m)
+    region_gdf = gpd.GeoDataFrame(geometry=[region_fp], crs="EPSG:2154")
+    region_gdf.to_file(out_dir / "region.gpkg", driver="GPKG")
+    validate_subset(grid, region_fp)  # garde-fou population ⊆ région
+
+    # 3. Réseau routier (walk + drive)
+    log.info("[3/6] Réseau routier %s", cfg.network_types)
+    roads = fetch_road_network(
+        region_fp, network_types=cfg.network_types,
+        cache_dir=out_dir, simplify=cfg.network_simplify,
+    )
+    for nt, edges in roads.items():
+        edges.to_file(out_dir / f"roads_{nt}.gpkg", driver="GPKG")
+        log.info("  réseau '%s' : %d arêtes", nt, len(edges))
+
+    # 4. Bâtiments dans l'emprise région (BD TOPO + enrichissement OSM)
+    log.info("[4/6] Bâtiments (région)")
+    buildings_shp = cfg.sources.get("buildings", DATA_DIR / "batim_grenoble.shp")
+    osm_gdf = fetch_osm_buildings(region_gdf, cache_dir=out_dir)
+    buildings = load_buildings(buildings_shp, study_area=region_gdf, osm_gdf=osm_gdf)
+    buildings_all = load_all_buildings(buildings_shp, study_area=region_gdf)
+
+    # 5. Allocation de la population aux bâtiments (sur la zone population)
+    log.info("[5/6] Allocation population")
+    joined = join_buildings_to_insee(buildings, grid)
+    result = allocate_population(joined)
+
+    # 6. Export pour GAMA
+    log.info("[6/6] Export")
+    export_results(result, out_dir)
+    export_all_buildings(buildings_all, out_dir)
+    log.info("=== Environnement généré dans %s ===", out_dir)
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _require(path: Path, prerequisite_step: str) -> None:
@@ -293,6 +367,7 @@ _STEPS = {
     "compare": step_compare,
     "casualties": step_casualties,
     "all": step_all,
+    "env": step_env,
 }
 
 
@@ -339,6 +414,12 @@ def main() -> None:
              "Requis pour --step casualties.",
     )
     parser.add_argument(
+        "--config",
+        default="config.yaml",
+        metavar="FILE",
+        help="Fichier de configuration YAML pour --step env (default: config.yaml).",
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Active les logs DEBUG.",
@@ -356,6 +437,8 @@ def main() -> None:
         )
     elif args.step == "casualties":
         step_fn(verbose=args.verbose, source=args.source, damage_csv=args.damage_csv)
+    elif args.step == "env":
+        step_fn(verbose=args.verbose, config_path=args.config)
     else:
         step_fn(verbose=args.verbose, source=args.source)
 
