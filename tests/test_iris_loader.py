@@ -125,7 +125,7 @@ class TestLoadCsvFromZip:
         with patch("src.loaders.iris._download", return_value=zip_path):
             df = _load_csv_from_zip("http://x", "test.zip", dep_code="01")
 
-        assert df["IRIS"].dtype == object
+        assert pd.api.types.is_string_dtype(df["IRIS"])
         assert df.iloc[0]["IRIS"] == "011110000"
 
     def test_empty_result_when_no_match(self, tmp_path):

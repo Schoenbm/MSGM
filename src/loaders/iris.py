@@ -155,7 +155,55 @@ def load_iris(
     log = _load_csv_from_zip(_LOG_URL, "base-ic-logement-2022.zip", csv_dep)
 
     # 3. Fusion des tables statistiques
-    stats = pop[["IRIS", "P22_POP", "P22_PMEN"]].merge(
+    _AGE_RAW = [
+        "P22_POP0002", "P22_POP0305", "P22_POP0610", "P22_POP1117",
+        "P22_POP1824", "P22_POP2539", "P22_POP4054", "P22_POP5564",
+        "P22_POP6579", "P22_POP80P",
+    ]
+    _AGE_RENAME = {
+        "P22_POP0002": "age_0_2",
+        "P22_POP0305": "age_3_5",
+        "P22_POP0610": "age_6_10",
+        "P22_POP1117": "age_11_17",
+        "P22_POP1824": "age_18_24",
+        "P22_POP2539": "age_25_39",
+        "P22_POP4054": "age_40_54",
+        "P22_POP5564": "age_55_64",
+        "P22_POP6579": "age_65_79",
+        "P22_POP80P":  "age_80p",
+    }
+    age_available = [c for c in _AGE_RAW if c in pop.columns]
+    if len(age_available) < len(_AGE_RAW):
+        missing_age = set(_AGE_RAW) - set(age_available)
+        logger.warning("Colonnes age absentes du fichier pop : %s", sorted(missing_age))
+
+    _CSP_RAW = [
+        "C22_POP15P_STAT_GSEC11_21",
+        "C22_POP15P_STAT_GSEC12_22",
+        "C22_POP15P_STAT_GSEC13_23",
+        "C22_POP15P_STAT_GSEC14_24",
+        "C22_POP15P_STAT_GSEC15_25",
+        "C22_POP15P_STAT_GSEC16_26",
+        "C22_POP15P_STAT_GSEC32",
+        "C22_POP15P_STAT_GSEC40",
+    ]
+    _CSP_RENAME = {
+        "C22_POP15P_STAT_GSEC11_21": "csp_agriculteurs",
+        "C22_POP15P_STAT_GSEC12_22": "csp_artisans_commercants",
+        "C22_POP15P_STAT_GSEC13_23": "csp_cadres",
+        "C22_POP15P_STAT_GSEC14_24": "csp_prof_intermediaires",
+        "C22_POP15P_STAT_GSEC15_25": "csp_employes",
+        "C22_POP15P_STAT_GSEC16_26": "csp_ouvriers",
+        "C22_POP15P_STAT_GSEC32":    "csp_chomeurs_inactifs",
+        "C22_POP15P_STAT_GSEC40":    "csp_autres_inactifs",
+    }
+    csp_available = [c for c in _CSP_RAW if c in pop.columns]
+    if len(csp_available) < len(_CSP_RAW):
+        missing_csp = set(_CSP_RAW) - set(csp_available)
+        logger.warning("Colonnes CSP absentes du fichier pop : %s", sorted(missing_csp))
+
+    pop_cols = ["IRIS", "P22_POP", "P22_PMEN"] + age_available + csp_available
+    stats = pop[pop_cols].merge(
         log[["IRIS", "P22_MEN"]], on="IRIS", how="left"
     )
 
@@ -167,6 +215,18 @@ def load_iris(
     gdf["taille_moy_menage"] = (
         gdf["P22_POP"] / gdf["P22_MEN"].replace(0, float("nan"))
     ).fillna(_TAILLE_MEN_DEFAUT)
+
+    # Renommage age → noms lisibles, valeurs manquantes → 0
+    for raw, friendly in _AGE_RENAME.items():
+        if raw in gdf.columns:
+            gdf[friendly] = gdf[raw].fillna(0)
+            gdf = gdf.drop(columns=[raw])
+
+    # Renommage CSP → noms lisibles, valeurs manquantes → 0
+    for raw, friendly in _CSP_RENAME.items():
+        if raw in gdf.columns:
+            gdf[friendly] = gdf[raw].fillna(0)
+            gdf = gdf.drop(columns=[raw])
 
     n_missing = gdf["P22_POP"].isna().sum()
     if n_missing > 0:
@@ -183,5 +243,14 @@ def load_iris(
         gdf["taille_moy_menage"].max(),
         gdf["taille_moy_menage"].mean(),
     )
+    age_cols_out = [c for c in _AGE_RENAME.values() if c in gdf.columns]
+    if age_cols_out:
+        age_totals = {c: gdf[c].sum() for c in age_cols_out}
+        logger.info("Tranches age (RP 2022) : %s", age_totals)
+
+    csp_cols_out = [c for c in _CSP_RENAME.values() if c in gdf.columns]
+    if csp_cols_out:
+        csp_totals = {c: gdf[c].sum() for c in csp_cols_out}
+        logger.info("CSP (pop 15+, GSEC 2022) : %s", csp_totals)
 
     return gdf

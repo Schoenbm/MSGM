@@ -30,6 +30,7 @@ def allocate_population(joined: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     result = joined.copy()
     result["population_allouee"] = 0
 
+    csp_cols = [c for c in joined.columns if c.startswith("csp_") or c.startswith("age_")]
     use_menages = "P22_MEN" in joined.columns and joined["P22_MEN"].notna().any()
     if use_menages:
         result["menages_alloues"] = 0
@@ -50,6 +51,11 @@ def allocate_population(joined: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     else:
         allocated = _allocate_by_cell(in_grid)
         result.loc[allocated.index, "population_allouee"] = allocated
+
+    if csp_cols:
+        _allocate_csp_columns(in_grid, csp_cols, result)
+        csp_totals = {c: result[c].sum() for c in csp_cols}
+        logger.info("CSP alloués (totaux) : %s", csp_totals)
 
     total_allocated = result["population_allouee"].sum()
     total_insee = round(in_grid.groupby("cell_idx")["Ind_total"].first().sum())
@@ -90,8 +96,8 @@ def _allocate_by_menages(in_grid: gpd.GeoDataFrame) -> tuple[pd.Series, pd.Serie
 
     Returns (population_series, menages_series) both as integer Series.
     """
-    pop_result = pd.Series(0, index=in_grid.index, dtype=int)
-    men_result = pd.Series(0, index=in_grid.index, dtype=int)
+    pop_result = pd.Series(0, index=in_grid.index, dtype="int64")
+    men_result = pd.Series(0, index=in_grid.index, dtype="int64")
 
     for cell_idx, group in in_grid.groupby("cell_idx", sort=False):
         total_men = round(group["P22_MEN"].iloc[0])
@@ -120,12 +126,41 @@ def _allocate_by_menages(in_grid: gpd.GeoDataFrame) -> tuple[pd.Series, pd.Serie
     return pop_result, men_result
 
 
+def _allocate_csp_columns(
+    in_grid: gpd.GeoDataFrame,
+    csp_cols: list[str],
+    result: gpd.GeoDataFrame,
+) -> None:
+    """Distribute each CSP column proportionally to NB_LOGTS (in-place).
+
+    Uses the same largest remainder method as the main population allocation
+    to guarantee non-negative integer values summing exactly to the IRIS total.
+    """
+    for col in csp_cols:
+        result[col] = 0
+        for _, group in in_grid.groupby("cell_idx", sort=False):
+            total = round(group[col].iloc[0])
+            if total == 0:
+                continue
+            if len(group) == 1:
+                result.loc[group.index[0], col] = total
+                continue
+            total_logts = group["NB_LOGTS"].sum()
+            if total_logts == 0:
+                per = total // len(group)
+                result.loc[group.index, col] = per
+                result.loc[group.index[0], col] += total - per * len(group)
+            else:
+                raw = group["NB_LOGTS"] / total_logts * total
+                result.loc[group.index, col] = _largest_remainder(raw, total)
+
+
 def _allocate_by_cell(in_grid: gpd.GeoDataFrame) -> pd.Series:
     """Fallback: direct proportional allocation by NB_LOGTS.
 
     Uses largest remainder method to guarantee non-negative integer allocations.
     """
-    result = pd.Series(0, index=in_grid.index, dtype=int)
+    result = pd.Series(0, index=in_grid.index, dtype="int64")
 
     for cell_idx, group in in_grid.groupby("cell_idx", sort=False):
         pop = round(group["Ind_total"].iloc[0])

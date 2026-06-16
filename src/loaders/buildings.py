@@ -44,6 +44,31 @@ def _fix_encoding(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     return gdf
 
 
+def load_all_buildings(
+    path: str | Path,
+    study_area: "gpd.GeoDataFrame | None" = None,
+) -> gpd.GeoDataFrame:
+    """Charge tous les bâtiments de la zone d'étude, sans filtre résidentiel.
+
+    Utilisé pour générer les lieux de travail ou tout autre usage nécessitant
+    l'ensemble du bâti (résidentiel + non-résidentiel).
+
+    Args:
+        path:       Chemin vers le shapefile bâtiments.
+        study_area: Si fourni, filtre par centroïde dans la zone d'étude.
+    """
+    path = Path(path)
+    gdf = gpd.read_file(path)
+    gdf = _fix_encoding(gdf)
+    logger.info("Tous bâtiments — %d au total avant filtre zone", len(gdf))
+
+    if study_area is not None:
+        gdf = _filter_by_study_area(gdf, study_area)
+
+    logger.info("%d bâtiments dans la zone d'étude (tous usages)", len(gdf))
+    return gdf
+
+
 def load_buildings(
     path: str | Path,
     study_area: "gpd.GeoDataFrame | None" = None,

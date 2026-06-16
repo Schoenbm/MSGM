@@ -30,7 +30,8 @@ def join_buildings_to_insee(
     centroids["geometry"] = buildings.geometry.centroid
 
     # 3. Jointure spatiale : centroïde dans carreau
-    insee_cols = ["Ind_total", "geometry"]
+    demo_cols = [c for c in insee.columns if c.startswith("csp_") or c.startswith("age_")]
+    insee_cols = ["Ind_total", "geometry"] + demo_cols
     for col in ("P22_MEN", "taille_moy_menage"):
         if col in insee.columns:
             insee_cols.append(col)

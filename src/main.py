@@ -26,6 +26,7 @@ INSEE_SHP = DATA_DIR / "insee_metro_grenoble.shp"
 
 # Fichiers intermédiaires — communs aux deux sources
 BUILDINGS_GPKG = PROCESSED_DIR / "buildings.gpkg"
+BUILDINGS_ALL_GPKG = PROCESSED_DIR / "buildings_all.gpkg"
 STUDY_AREA_GPKG = PROCESSED_DIR / "study_area.gpkg"
 
 # Fichiers intermédiaires — spécifiques à chaque source
@@ -102,6 +103,7 @@ def step_load(
 
     # ── Bâtiments : enrichissement OSM puis chargement ────────────────────────
     from src.loaders.osm import fetch_osm_buildings
+    from src.loaders.buildings import load_all_buildings
 
     # Zone de référence pour la bbox OSM : study_area si disponible, sinon grille entière
     osm_bbox_area = study_area if study_area is not None else gpd.GeoDataFrame(
@@ -113,6 +115,11 @@ def step_load(
     buildings = load_buildings(BUILDINGS_SHP, study_area=study_area, osm_gdf=osm_gdf)
     buildings.to_file(BUILDINGS_GPKG, driver="GPKG")
     log.info("%d bâtiments résidentiels sauvegardés -> %s", len(buildings), BUILDINGS_GPKG)
+
+    # Tous les bâtiments (résidentiels + non-résidentiels) pour les lieux de travail
+    buildings_all = load_all_buildings(BUILDINGS_SHP, study_area=study_area)
+    buildings_all.to_file(BUILDINGS_ALL_GPKG, driver="GPKG")
+    log.info("%d bâtiments (tous usages) sauvegardés -> %s", len(buildings_all), BUILDINGS_ALL_GPKG)
 
 
 def step_match(verbose: bool = False, source: str = "filosofi") -> None:
@@ -148,7 +155,7 @@ def step_export(verbose: bool = False, source: str = "filosofi") -> None:
     log = logging.getLogger(__name__)
 
     import geopandas as gpd
-    from src.output.export import export_results
+    from src.output.export import export_results, export_all_buildings
 
     log.info("=== STEP export (source=%s) ===", source)
     _, result_gpkg = _source_paths(source)
@@ -157,6 +164,12 @@ def step_export(verbose: bool = False, source: str = "filosofi") -> None:
     result = gpd.read_file(result_gpkg)
     out_dir = PROCESSED_DIR / source
     export_results(result, out_dir)
+
+    if BUILDINGS_ALL_GPKG.exists():
+        buildings_all = gpd.read_file(BUILDINGS_ALL_GPKG)
+        export_all_buildings(buildings_all, out_dir)
+    else:
+        log.warning("buildings_all.gpkg absent — relancer --step load pour l'obtenir")
 
 
 def step_visualize(verbose: bool = False, source: str = "filosofi") -> None:

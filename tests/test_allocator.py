@@ -330,6 +330,110 @@ def test_menages_dtype_is_integer():
     assert pd.api.types.is_integer_dtype(result["menages_alloues"])
 
 
+# ── CSP allocation ────────────────────────────────────────────────────────────
+
+def _make_gdf_csp(rows: list[dict]) -> gpd.GeoDataFrame:
+    """Build a GeoDataFrame with CSP columns for CSP allocation tests."""
+    unit_square = Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
+    records = []
+    for i, row in enumerate(rows):
+        records.append({
+            "ID": row.get("ID", f"BAT{i}"),
+            "NB_LOGTS": row["NB_LOGTS"],
+            "Ind_total": row.get("Ind_total", None),
+            "cell_idx": row.get("cell_idx", None),
+            "csp_cadres": row.get("csp_cadres", 0.0),
+            "csp_employes": row.get("csp_employes", 0.0),
+            "geometry": unit_square,
+        })
+    return gpd.GeoDataFrame(records, crs="EPSG:2154")
+
+
+def test_csp_conservation_per_iris():
+    """Sum of csp_cadres across buildings in a cell equals the IRIS total."""
+    gdf = _make_gdf_csp([
+        {"NB_LOGTS": 10, "Ind_total": 100.0, "csp_cadres": 30.0, "cell_idx": 1},
+        {"NB_LOGTS": 20, "Ind_total": 100.0, "csp_cadres": 30.0, "cell_idx": 1},
+        {"NB_LOGTS": 30, "Ind_total": 100.0, "csp_cadres": 30.0, "cell_idx": 1},
+    ])
+    result = allocate_population(gdf)
+    assert result["csp_cadres"].sum() == 30
+
+
+def test_csp_proportional_to_nb_logts():
+    """Building with double NB_LOGTS receives double CSP allocation."""
+    gdf = _make_gdf_csp([
+        {"ID": "A", "NB_LOGTS": 5,  "Ind_total": 30.0, "csp_cadres": 12.0, "cell_idx": 1},
+        {"ID": "B", "NB_LOGTS": 10, "Ind_total": 30.0, "csp_cadres": 12.0, "cell_idx": 1},
+    ])
+    result = allocate_population(gdf)
+    csp_a = result.loc[result["ID"] == "A", "csp_cadres"].iloc[0]
+    csp_b = result.loc[result["ID"] == "B", "csp_cadres"].iloc[0]
+    assert csp_b == 2 * csp_a
+    assert csp_a + csp_b == 12
+
+
+def test_csp_zero_iris_gives_zero_buildings():
+    """When IRIS CSP total is 0, all buildings receive 0."""
+    gdf = _make_gdf_csp([
+        {"NB_LOGTS": 10, "Ind_total": 50.0, "csp_cadres": 0.0, "cell_idx": 1},
+        {"NB_LOGTS": 20, "Ind_total": 50.0, "csp_cadres": 0.0, "cell_idx": 1},
+    ])
+    result = allocate_population(gdf)
+    assert (result["csp_cadres"] == 0).all()
+
+
+def test_csp_multiple_categories_independent():
+    """Multiple CSP categories are allocated independently."""
+    gdf = _make_gdf_csp([
+        {"NB_LOGTS": 10, "Ind_total": 60.0, "csp_cadres": 20.0, "csp_employes": 10.0, "cell_idx": 1},
+        {"NB_LOGTS": 10, "Ind_total": 60.0, "csp_cadres": 20.0, "csp_employes": 10.0, "cell_idx": 1},
+    ])
+    result = allocate_population(gdf)
+    assert result["csp_cadres"].sum() == 20
+    assert result["csp_employes"].sum() == 10
+
+
+# ── Age allocation ────────────────────────────────────────────────────────────
+
+def _make_gdf_age(rows: list[dict]) -> gpd.GeoDataFrame:
+    """Build a GeoDataFrame with age columns for age allocation tests."""
+    unit_square = Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
+    records = []
+    for i, row in enumerate(rows):
+        records.append({
+            "ID": row.get("ID", f"BAT{i}"),
+            "NB_LOGTS": row["NB_LOGTS"],
+            "Ind_total": row.get("Ind_total", None),
+            "cell_idx": row.get("cell_idx", None),
+            "age_0_2": row.get("age_0_2", 0.0),
+            "age_80p": row.get("age_80p", 0.0),
+            "geometry": unit_square,
+        })
+    return gpd.GeoDataFrame(records, crs="EPSG:2154")
+
+
+def test_age_conservation_per_iris():
+    """Sum of age_0_2 across buildings in a cell equals the IRIS total."""
+    gdf = _make_gdf_age([
+        {"NB_LOGTS": 10, "Ind_total": 100.0, "age_0_2": 15.0, "cell_idx": 1},
+        {"NB_LOGTS": 20, "Ind_total": 100.0, "age_0_2": 15.0, "cell_idx": 1},
+        {"NB_LOGTS": 30, "Ind_total": 100.0, "age_0_2": 15.0, "cell_idx": 1},
+    ])
+    result = allocate_population(gdf)
+    assert result["age_0_2"].sum() == 15
+
+
+def test_age_zero_gives_zero_buildings():
+    """When IRIS age total is 0, all buildings receive 0."""
+    gdf = _make_gdf_age([
+        {"NB_LOGTS": 10, "Ind_total": 50.0, "age_80p": 0.0, "cell_idx": 1},
+        {"NB_LOGTS": 20, "Ind_total": 50.0, "age_80p": 0.0, "cell_idx": 1},
+    ])
+    result = allocate_population(gdf)
+    assert (result["age_80p"] == 0).all()
+
+
 def test_menages_zero_nb_logts_equal_split():
     """When NB_LOGTS=0 for all, menages are split equally."""
     gdf = _make_gdf_menages([

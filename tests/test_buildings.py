@@ -11,6 +11,7 @@ from src.loaders.buildings import (
     _filter_by_study_area,
     estimate_nb_logts,
     filter_residential,
+    load_all_buildings,
 )
 
 
@@ -481,3 +482,68 @@ class TestEstimateNbLogtsOsm:
         gdf = self._gdf(NB_LOGTS=4.0)
         result = estimate_nb_logts(gdf)
         assert result.iloc[0]["NB_LOGTS_ESTIME"] == False  # noqa: E712
+
+
+# ── load_all_buildings ────────────────────────────────────────────────────────
+
+class TestLoadAllBuildings:
+    """Tests de load_all_buildings : tous les bâtiments, sans filtre résidentiel."""
+
+    _ZONE = Polygon([(0, 0), (100, 0), (100, 100), (0, 100)])
+    _INSIDE = Polygon([(0, 0), (10, 0), (10, 10), (0, 10)])    # centroïde (5,5) — dedans
+    _OUTSIDE = Polygon([(200, 200), (210, 200), (210, 210), (200, 210)])  # centroïde (205,205) — dehors
+
+    def _make_shp(self, tmp_path, rows: list[dict]) -> str:
+        """Écrit un shapefile minimal et retourne son chemin."""
+        records = []
+        for i, row in enumerate(rows):
+            records.append({
+                "ID": row.get("ID", f"BAT{i}"),
+                "USAGE1": row.get("USAGE1", "Résidentiel"),
+                "USAGE2": row.get("USAGE2", None),
+                "geometry": row.get("geometry", self._INSIDE),
+            })
+        gdf = gpd.GeoDataFrame(records, crs="EPSG:2154")
+        path = str(tmp_path / "batiments.shp")
+        gdf.to_file(path)
+        return path
+
+    def _make_study_area(self) -> gpd.GeoDataFrame:
+        return gpd.GeoDataFrame(geometry=[self._ZONE], crs="EPSG:2154")
+
+    def test_returns_geodataframe(self, tmp_path):
+        path = self._make_shp(tmp_path, [{"USAGE1": "Résidentiel"}])
+        result = load_all_buildings(path)
+        assert isinstance(result, gpd.GeoDataFrame)
+
+    def test_no_residential_filter(self, tmp_path):
+        """Bâtiments non-résidentiels inclus, contrairement à load_buildings."""
+        path = self._make_shp(tmp_path, [
+            {"USAGE1": "Résidentiel"},
+            {"USAGE1": "Commercial"},
+            {"USAGE1": "Industriel"},
+        ])
+        result = load_all_buildings(path)
+        assert len(result) == 3
+
+    def test_study_area_filters_outside_buildings(self, tmp_path):
+        path = self._make_shp(tmp_path, [
+            {"USAGE1": "Résidentiel", "geometry": self._INSIDE},
+            {"USAGE1": "Commercial",  "geometry": self._OUTSIDE},
+        ])
+        study_area = self._make_study_area()
+        result = load_all_buildings(path, study_area=study_area)
+        assert len(result) == 1
+
+    def test_no_study_area_returns_all(self, tmp_path):
+        path = self._make_shp(tmp_path, [
+            {"USAGE1": "Résidentiel", "geometry": self._INSIDE},
+            {"USAGE1": "Commercial",  "geometry": self._OUTSIDE},
+        ])
+        result = load_all_buildings(path)
+        assert len(result) == 2
+
+    def test_preserves_usage_columns(self, tmp_path):
+        path = self._make_shp(tmp_path, [{"USAGE1": "Commercial", "USAGE2": "Bureaux"}])
+        result = load_all_buildings(path)
+        assert "USAGE1" in result.columns
