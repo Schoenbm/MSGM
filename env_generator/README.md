@@ -128,6 +128,13 @@ téléchargement IGN — jamais de mélange local + download (pas de millésimes
 | `buildings_full.{geojson,csv,shp}` | Tous attributs |
 | `buildings_all.{geojson,shp}` | Tous bâtiments (résidentiels + non) — lieux de travail |
 
+> **Pour vérifier sous QGIS** : charger les `.gpkg` / `.shp`, qui sont en
+> **Lambert-93** ; les `.geojson` portent le même contenu mais en **WGS84**.
+> Le dossier contient aussi des fichiers de **cache** suffixés d'un hash
+> (`roads_walk_<hash>.gpkg`, `osm_buildings_<hash>.geojson`) — les livrables sont
+> les versions **sans hash**. Contrôles utiles : `population_iris ⊆ region`, et les
+> bâtiments hors zone population avec `population = 0` (attendu).
+
 ---
 
 ## Algorithme de population
