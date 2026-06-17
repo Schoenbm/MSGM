@@ -8,6 +8,7 @@ data/*.qmd
 data/Qgis/
 data/cache/
 data/BDNB/
+cache/
 genstar*/
 __pycache__/
 *.pyc

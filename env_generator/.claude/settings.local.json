@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd:*)",
+      "Bash(python -c ':*)",
+      "WebFetch(domain:www.insee.fr)"
+    ]
+  }
+}
