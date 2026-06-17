@@ -19,6 +19,8 @@ import geopandas as gpd
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
 
+from .cache import ensure_cached, valid_geofile
+
 logger = logging.getLogger(__name__)
 
 TARGET_CRS = "EPSG:2154"        # Lambert-93, imposé (DT + standard France)
@@ -98,26 +100,30 @@ def _fetch_one(
     simplify: bool,
 ) -> gpd.GeoDataFrame:
     cache_path = _cache_path(cache_dir, network_type, h)
-    if cache_path.exists():
-        logger.info("Cache routes trouvé (%s) : %s", network_type, cache_path)
-        return gpd.read_file(cache_path)
 
-    ox = _ox()
-    logger.info("Téléchargement OSM réseau '%s'...", network_type)
-    graph = ox.graph_from_polygon(poly_wgs84, network_type=network_type, simplify=simplify)
-    edges = ox.graph_to_gdfs(graph, nodes=False)
+    def _produce(tmp: Path) -> None:
+        ox = _ox()
+        logger.info("Téléchargement OSM réseau '%s'...", network_type)
+        graph = ox.graph_from_polygon(poly_wgs84, network_type=network_type, simplify=simplify)
+        edges = ox.graph_to_gdfs(graph, nodes=False)
 
-    edges = edges.to_crs(TARGET_CRS)
-    keep = [c for c in _KEEP_COLS if c in edges.columns]
-    edges = edges[keep].copy()
-    for col in _LIST_COLS:
-        if col in edges.columns:
-            edges[col] = edges[col].astype(str)
-    edges = edges.reset_index(drop=True)
+        edges = edges.to_crs(TARGET_CRS)
+        keep = [c for c in _KEEP_COLS if c in edges.columns]
+        edges = edges[keep].copy()
+        for col in _LIST_COLS:
+            if col in edges.columns:
+                edges[col] = edges[col].astype(str)
+        edges = edges.reset_index(drop=True)
+        edges.to_file(tmp, driver="GPKG")
+        logger.info("Réseau '%s' : %d arêtes -> %s", network_type, len(edges), cache_path)
 
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    edges.to_file(cache_path, driver="GPKG")
-    logger.info(
-        "Réseau '%s' : %d arêtes -> %s", network_type, len(edges), cache_path
+    # Pipeline de cache unique : réutilise le GeoPackage s'il est lisible, sinon
+    # (re)télécharge atomiquement (un .gpkg corrompu par une écriture interrompue
+    # est détecté par valid_geofile et régénéré).
+    ensure_cached(
+        cache_path,
+        produce=_produce,
+        validate=valid_geofile,
+        label=f"routes {network_type} ({cache_path.name})",
     )
-    return edges
+    return gpd.read_file(cache_path)

@@ -70,6 +70,15 @@ erreur).
 
 ## Décisions de conception à respecter
 
+- **Pipeline de cache unique (`loaders/cache.py`).** Tout accès à des données
+  onéreuses (download IGN/INSEE, requête OSM/Overpass, extraction d'archive) passe
+  par `ensure_cached(dest, produce=..., validate=...)` : check local → contrôle
+  d'intégrité → sinon (re)production **atomique** (`.part` puis renommage). Un
+  produit interrompu ne laisse jamais un cache corrompu pris pour valide (bug réel
+  rencontré : zip INSEE tronqué accepté comme cache). La **seule** partie
+  spécifique au type de données est le *validateur* (`valid_zip`, `valid_7z`,
+  `valid_geofile`, `valid_dir_with`). **Ne pas** réintroduire de `if path.exists():`
+  ad hoc dans un loader — ajouter un validateur et router par `ensure_cached`.
 - **Source unique pour les IRIS.** Si le shapefile local ne couvre pas tous les
   codes demandés : `on_missing="error"` (défaut, lève `MissingIrisError`) ou
   `"download"` (rebascule **entièrement** sur l'IGN France). **Jamais** de fusion

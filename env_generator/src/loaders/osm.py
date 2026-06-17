@@ -8,6 +8,8 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 
+from .cache import ensure_cached, valid_geofile
+
 logger = logging.getLogger(__name__)
 
 OVERLAP_THRESHOLD: float = 0.5  # fraction de la surface OSM devant chevaucher le footprint BD_TOPO
@@ -43,25 +45,26 @@ def fetch_osm_buildings(
     h = _bbox_hash(bbox)
     cache_path = cache_dir / f"osm_buildings_{h}.geojson"
 
-    if cache_path.exists():
-        logger.info("Cache OSM trouvé : %s", cache_path)
-        gdf = gpd.read_file(cache_path)
-        n_flats = gdf["building_flats"].notna().sum() if "building_flats" in gdf.columns else 0
-        n_levels = gdf["building_levels"].notna().sum() if "building_levels" in gdf.columns else 0
+    def _produce(tmp: Path) -> None:
         logger.info(
-            "%d bâtiments OSM chargés (building:flats=%d, building:levels=%d)",
-            len(gdf), n_flats, n_levels,
+            "Telechargement OSM via Overpass -- bbox WGS84 : [%.4f, %.4f] -> [%.4f, %.4f]",
+            bbox[0], bbox[1], bbox[2], bbox[3],
         )
-        return gdf
+        gdf = _query_overpass(bbox)
+        gdf.to_file(tmp, driver="GeoJSON")
+        logger.info("Bâtiments OSM téléchargés : %d", len(gdf))
 
+    # Pipeline de cache unique : réutilise le GeoJSON s'il est lisible, sinon
+    # (re)télécharge atomiquement (un cache corrompu est détecté et régénéré).
+    ensure_cached(cache_path, produce=_produce, validate=valid_geofile, label=cache_path.name)
+
+    gdf = gpd.read_file(cache_path)
+    n_flats = gdf["building_flats"].notna().sum() if "building_flats" in gdf.columns else 0
+    n_levels = gdf["building_levels"].notna().sum() if "building_levels" in gdf.columns else 0
     logger.info(
-        "Telechargement OSM via Overpass -- bbox WGS84 : [%.4f, %.4f] -> [%.4f, %.4f]",
-        bbox[0], bbox[1], bbox[2], bbox[3],
+        "%d bâtiments OSM chargés (building:flats=%d, building:levels=%d)",
+        len(gdf), n_flats, n_levels,
     )
-    gdf = _query_overpass(bbox)
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    gdf.to_file(cache_path, driver="GeoJSON")
-    logger.info("Cache OSM sauvegardé : %s (%d bâtiments)", cache_path, len(gdf))
     return gdf
 
 

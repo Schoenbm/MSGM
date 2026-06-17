@@ -96,6 +96,46 @@ class TestDownload:
 
         assert dest.parent.exists()
 
+    def test_incomplete_download_raises_and_leaves_no_cache(self, tmp_path):
+        # Content-Length annonce 10 octets, on n'en reçoit que 5 → tronqué.
+        # Le cache final ne doit PAS être créé, et le .part doit être nettoyé.
+        dest = tmp_path / "file.zip"
+        mock_response = MagicMock()
+        mock_response.__enter__ = lambda s: s
+        mock_response.__exit__ = MagicMock(return_value=False)
+        mock_response.raise_for_status = MagicMock()
+        mock_response.headers = {"content-length": "10"}
+        mock_response.iter_content = MagicMock(return_value=[b"hello"])
+
+        with patch("src.loaders.iris.requests.get", return_value=mock_response):
+            with pytest.raises(IOError):
+                _download("http://example.com/file.zip", dest)
+
+        assert not dest.exists()
+        assert list(tmp_path.iterdir()) == []  # ni cache final ni temporaire (.part)
+
+    def test_network_error_leaves_no_cache(self, tmp_path):
+        # Une coupure réseau en plein stream ne doit laisser ni cache ni .part.
+        dest = tmp_path / "file.zip"
+
+        def stream_then_fail():
+            yield b"partial"
+            raise ConnectionError("réseau coupé")
+
+        mock_response = MagicMock()
+        mock_response.__enter__ = lambda s: s
+        mock_response.__exit__ = MagicMock(return_value=False)
+        mock_response.raise_for_status = MagicMock()
+        mock_response.headers = {"content-length": "100"}
+        mock_response.iter_content = MagicMock(return_value=stream_then_fail())
+
+        with patch("src.loaders.iris.requests.get", return_value=mock_response):
+            with pytest.raises(ConnectionError):
+                _download("http://example.com/file.zip", dest)
+
+        assert not dest.exists()
+        assert list(tmp_path.iterdir()) == []  # ni cache final ni temporaire (.part)
+
 
 # ── _load_csv_from_zip ────────────────────────────────────────────────────────
 

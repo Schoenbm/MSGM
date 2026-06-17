@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
 
+from .cache import ensure_cached, valid_7z, valid_dir_with, valid_zip
+
 logger = logging.getLogger(__name__)
 
 # ── URLs ──────────────────────────────────────────────────────────────────────
@@ -54,12 +56,8 @@ class MissingIrisError(ValueError):
 
 # ── Download / cache ──────────────────────────────────────────────────────────
 
-def _download(url: str, dest: Path) -> Path:
-    """Download url → dest. Skip if already cached."""
-    if dest.exists():
-        logger.info("Cache trouvé : %s", dest.name)
-        return dest
-    dest.parent.mkdir(parents=True, exist_ok=True)
+def _stream_to_file(url: str, dest: Path) -> None:
+    """Stream HTTP `url` → `dest`. Lève si le transfert est incomplet (Content-Length)."""
     logger.info("Téléchargement : %s", url)
     with requests.get(url, stream=True, timeout=300) as r:
         r.raise_for_status()
@@ -73,13 +71,39 @@ def _download(url: str, dest: Path) -> Path:
                     pct = downloaded / total * 100
                     if pct % 10 < (downloaded - len(chunk)) / total * 100 % 10 or pct >= 99:
                         logger.debug("  %.0f%%", pct)
-    logger.info("Téléchargé : %s (%.1f MB)", dest.name, dest.stat().st_size / 1e6)
-    return dest
+    if total and downloaded != total:
+        raise IOError(
+            f"Téléchargement incomplet : {downloaded} octets reçus sur {total} "
+            f"attendus ({url}). Réessayez."
+        )
+
+
+def _download(url: str, dest: Path, validate=None) -> Path:
+    """Télécharge `url` → `dest` via la pipeline de cache unique (ensure_cached).
+
+    `validate` contrôle l'intégrité du fichier (cache existant comme nouveau
+    téléchargement) — p.ex. `valid_zip` / `valid_7z`. La complétude du transfert
+    HTTP lui-même (Content-Length) est vérifiée par `_stream_to_file`.
+    """
+    return ensure_cached(
+        dest,
+        produce=lambda tmp: _stream_to_file(url, tmp),
+        validate=validate,
+        label=dest.name,
+    )
+
+
+def _find_contours_shp(extract_dir: Path) -> "Path | None":
+    """CONTOURS-IRIS.shp en priorité, sinon tout .shp sauf EMPRISE ; None si absent."""
+    shp_files = [p for p in extract_dir.rglob("*.shp") if p.stem == "CONTOURS-IRIS"]
+    if not shp_files:
+        shp_files = [p for p in extract_dir.rglob("*.shp") if p.stem != "EMPRISE"]
+    return shp_files[0] if shp_files else None
 
 
 def _extract_contours_7z(archive: Path, extract_dir: Path) -> Path:
-    """Extract 7z archive and return path to the CONTOURS-IRIS .shp file."""
-    if not extract_dir.exists():
+    """Extract 7z archive (via le cache atomique) and return the CONTOURS-IRIS .shp."""
+    def _extract(tmp_dir: Path) -> None:
         try:
             import py7zr
         except ImportError as e:
@@ -88,22 +112,29 @@ def _extract_contours_7z(archive: Path, extract_dir: Path) -> Path:
                 "Installez-le avec : pip install py7zr"
             ) from e
         logger.info("Extraction de l'archive 7z (peut prendre une minute)...")
+        tmp_dir.mkdir(parents=True, exist_ok=True)
         with py7zr.SevenZipFile(archive, mode="r") as z:
-            z.extractall(path=extract_dir)
-        logger.info("Extraction terminée dans %s", extract_dir)
+            z.extractall(path=tmp_dir)
 
-    # Chercher CONTOURS-IRIS.shp en priorité (ignorer EMPRISE.shp)
-    shp_files = [p for p in extract_dir.rglob("*.shp") if p.stem == "CONTOURS-IRIS"]
-    if not shp_files:
-        shp_files = [p for p in extract_dir.rglob("*.shp") if p.stem != "EMPRISE"]
-    if not shp_files:
+    # Une extraction interrompue laisse un .part incomplet (supprimé), jamais un
+    # dossier partiel pris pour valide. Le validateur exige un .shp exploitable.
+    ensure_cached(
+        extract_dir,
+        produce=_extract,
+        validate=valid_dir_with(
+            glob="*.shp", predicate=lambda p: p.stem != "EMPRISE"
+        ),
+        label=extract_dir.name,
+    )
+    shp = _find_contours_shp(extract_dir)
+    if shp is None:
         raise FileNotFoundError(f"Aucun fichier CONTOURS-IRIS.shp trouvé dans {extract_dir}")
-    return shp_files[0]
+    return shp
 
 
 def _load_csv_from_zip(url: str, cache_name: str, dep_code: str) -> pd.DataFrame:
     """Download ZIP containing a CSV, return as DataFrame filtered to dep_code."""
-    archive = _download(url, _CACHE_DIR / cache_name)
+    archive = _download(url, _CACHE_DIR / cache_name, validate=valid_zip)
     with zipfile.ZipFile(archive) as z:
         csv_name = next(
             n for n in z.namelist()
@@ -177,7 +208,7 @@ def _load_contours_raw(
             gdf = gdf.rename(columns={"code_iris": CODE_COL})
         logger.info("IRIS chargés depuis shapefile : %d IRIS", len(gdf))
     else:
-        archive = _download(contours_url, _CACHE_DIR / "contours-iris-2024.7z")
+        archive = _download(contours_url, _CACHE_DIR / "contours-iris-2024.7z", validate=valid_7z)
         contours_shp = _extract_contours_7z(archive, _CACHE_DIR / "contours-iris-2024")
         gdf = gpd.read_file(contours_shp)
         logger.info("CONTOURS-IRIS chargés : %d IRIS (France entière)", len(gdf))
