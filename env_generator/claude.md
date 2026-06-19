@@ -30,11 +30,12 @@ env_generator/
 │   ├── config.py                # lecture config.yaml (Config, ZoneConfig)
 │   ├── loaders/
 │   │   ├── iris.py              # CONTOURS-IRIS + INSEE RP 2022 ; Selector, resolve_zone, validate_subset
-│   │   ├── osm.py               # OSM via Overpass : bâtiments (flats/levels) + équipements éducatifs
+│   │   ├── osm.py               # OSM via Overpass : enrichissement bâtiments (flats/levels)
 │   │   ├── buildings.py         # BD TOPO : filtre résidentiel, NB_LOGTS, load_all_buildings
 │   │   ├── insee.py             # carreaux Filosofi (Ind_total)
-│   │   └── roads.py             # réseau routier OSM (osmnx, walk/drive) -> Lambert-93
-│   │   ├── mobpro.py            # flux domicile-travail INSEE (MOBPRO 2022) — calage futur
+│   │   ├── roads.py             # réseau routier OSM (osmnx, walk/drive) -> Lambert-93
+│   │   ├── bpe.py               # BPE 2024 : équipements éducatifs géolocalisés (crèche/école/collège/lycée)
+│   │   └── mobpro.py            # flux domicile-travail INSEE (MOBPRO 2022) — calage futur
 │   ├── matching/
 │   │   ├── spatial_join.py      # centroïdes bâtiments ↔ grille (porte les colonnes âge/CSP)
 │   │   ├── allocator.py         # allocation pop/ménages + âge/CSP (plus fort reste)
@@ -92,22 +93,21 @@ affecte par activité une destination tirée par `P(j|i) ∝ capacité_j × exp(
   `workplaces.usages` (défaut Commercial et services, Industriel, Agricole,
   Religieux, Sportif ; **`Indifférencié` exclu** car ~35k bâtiments trop bruités —
   à corriger) ; capacité = surface de plancher ; `workplaces.decay_m` (déf. 3000 m).
-- **crèche / école / collège / lycée** : équipements OSM
-  (`loaders.osm.fetch_osm_education`) ; capacité unité (proximité dominante) ;
-  `education.decay_m` (déf. 1200 m, plus court — on scolarise au plus proche).
-  OSM ne séparant pas les niveaux (`amenity=school` partout), collège/lycée sont
-  identifiés par **nom** (« Collège … », « Lycée … ») et `isced:level`, avec repli
-  sur le pool « école » générique si aucun établissement typé. Le supérieur
-  (`college`/`university` OSM) est exclu (aucun agent > 17 ans scolarisé).
+- **crèche / école / collège / lycée** : équipements **BPE** géolocalisés
+  (`loaders.bpe.load_bpe_education`, codes `TYPEQU` → niveau exact) ; capacité
+  unité (la capacité d'accueil BPE n'est pas renseignée pour l'enseignement →
+  proximité dominante) ; `education.decay_m` (déf. 1200 m, plus court — on
+  scolarise au plus proche). Collège/lycée retombent sur le pool « école » si vide.
 
 Sortie : `agents.gpkg` / `agents.geojson` / `agents.csv` (colonnes : `agent_id`,
 `home_id`, `age`, `age_band`, `csp`, `activity`, `is_worker`, `dest_id`,
 `dest_x/y`, `dist_m`, géométrie = point domicile).
 
-**Équipements éducatifs (`loaders/osm.py::fetch_osm_education`).** Requête Overpass
-**distincte** de `fetch_osm_buildings` (qui ne ramène que building:flats/levels) :
-cible les tags éducatifs, ramène chaque équipement à un point (`out center`), cache
-GeoJSON par bbox (`osm_education_<hash>.geojson`).
+**Équipements éducatifs (`loaders/bpe.py`).** Source autoritaire (BPE 2024, INSEE) :
+`load_bpe_education(departement)` télécharge le fichier détail (~157 Mo, cache
+unique), filtre aux `TYPEQU` éducatifs (C107/108/109 → école, C201 → collège,
+C301/302/303 → lycée, D502 → crèche) et au département, et renvoie des points
+Lambert-93 (`equip_id`, `kind`, `capacity`, `nom`).
 
 **MOBPRO (`loaders/mobpro.py`).** Télécharge (via `ensure_cached`) la base de flux
 domicile-travail INSEE 2022 (commune→commune, ~11 Mo, `NBFLUX_C22_ACTOCC15P`).
@@ -117,10 +117,30 @@ branché** : réservé au calage futur des `decay_m` (gravitaire non calibré).
 > Assomptions du premier jet (« on redesignera si besoin ») : âge et CSP tirés
 > comme marges indépendantes (pas de table jointe gospl/IPF) ; seuil adulte 18 ans
 > (15-17 ans en mineurs côté CSP) ; retraite couperet à 62 ans ; équipements
-> éducatifs à capacité uniforme (pas d'effectifs réels) ; niveaux scolaires
-> distingués par âge (répartition uniforme) et par nom/isced côté OSM (faillible) ;
-> pas de fuite hors région ni télétravail ; gravitaires non calibrés. Voir les
-> docstrings de `agents.py` / `workplaces.py`.
+> éducatifs à capacité uniforme (capacité BPE absente) ; niveaux scolaires
+> distingués par âge (répartition uniforme) ; pas de fuite hors région ni
+> télétravail ; gravitaires non calibrés. Voir les docstrings de `agents.py` /
+> `workplaces.py`.
+
+---
+
+## Sources de données (qui sert à quoi)
+
+| Source | Producteur | Accès / format | Loader | Rôle dans le pipeline | Statut |
+|---|---|---|---|---|---|
+| **BD TOPO — bâti** | IGN | `data/batim_grenoble.shp` (local) | `loaders/buildings.py` | **Socle du bâti** : géométrie, `USAGE1/2`, `NB_LOGTS`, `HAUTEUR`, `NB_ETAGES`. Bâtiments résidentiels (domiciles) + lieux de travail. | **Active — source principale du bâti** |
+| **CONTOURS-IRIS** | IGN | local `.shp` ou download 7z | `loaders/iris.py` | Géométries des IRIS (zones `population` et `region`). | Active |
+| **RP 2022 (base-ic pop + logement)** | INSEE | download zip CSV | `loaders/iris.py` | Démographie par IRIS : population, **âge** (`age_*`), **CSP** (`csp_*`), ménages. | Active |
+| **Filosofi (carreaux 200 m)** | INSEE | `data/insee_metro_grenoble.shp` | `loaders/insee.py` | Population carroyée (allocation `--source filosofi`). | Active (source alternative) |
+| **OSM — bâtiments** | OpenStreetMap (Overpass) | download/cache GeoJSON | `loaders/osm.py` | **Enrichissement** du bâti : `building:flats`/`levels` (estime `NB_LOGTS`), tag usage pour le filtre résidentiel. | Active — secondaire |
+| **OSM — réseau routier** | OpenStreetMap (osmnx) | download | `loaders/roads.py` | Réseau routier piéton + voiture (Lambert-93). | Active |
+| **BPE 2024** | INSEE | download zip CSV (~157 Mo) | `loaders/bpe.py` | **Équipements éducatifs géolocalisés** (codes `TYPEQU`) : destinations crèche/école/collège/lycée des agents enfants. | Active |
+| **MOBPRO 2022** | INSEE | download zip CSV (~11 Mo) | `loaders/mobpro.py` | Flux domicile-travail commune→commune. | **Réservée** — calage futur du gravitaire, non branchée |
+| **BDNB** | CSTB | `data/BDNB/gpkg/bdnb.gpkg` (2,5 Go) | *(aucun)* | Base consolidée du bâti (DPE, énergie, fichiers fonciers, liens BPE/BD TOPO). | **Non utilisée** — piste : DPE/usage pour affiner les lieux de travail (dégonfler `Indifférencié`). Ne porte **pas** le niveau scolaire (BPE le fait). |
+
+> Toutes les sources distantes passent par le **pipeline de cache unique**
+> (`loaders/cache.py`, `ensure_cached`). Millésimes couplés au code (RP/MOBPRO 2022,
+> BPE 2024, CONTOURS-IRIS 2024) — changer d'année demande de toucher loaders/URLs.
 
 ---
 

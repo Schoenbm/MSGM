@@ -299,7 +299,8 @@ def step_env(verbose: bool = False, config_path: str = "config.yaml", assume_yes
     from src.config import load_config
     from src.loaders.iris import load_iris, resolve_zone, validate_subset, MissingIrisError
     from src.loaders.roads import fetch_road_network
-    from src.loaders.osm import fetch_osm_buildings, fetch_osm_education
+    from src.loaders.osm import fetch_osm_buildings
+    from src.loaders.bpe import load_bpe_education
     from src.loaders.buildings import load_buildings, load_all_buildings
     from src.matching.spatial_join import join_buildings_to_insee
     from src.matching.allocator import allocate_population
@@ -385,7 +386,8 @@ def step_env(verbose: bool = False, config_path: str = "config.yaml", assume_yes
 
     # 6. Génération des agents (âge + CSP + domicile + destination travail/école/crèche)
     log.info("[6/7] Génération des agents")
-    education = fetch_osm_education(region_gdf, cache_dir=out_dir)
+    departement = grid["CODE_IRIS"].iloc[0][:2] if not grid.empty else "38"
+    education = load_bpe_education(departement=departement)
     agents = generate_agents(
         result, buildings_all, education=education,
         usages=cfg.workplace_usages,

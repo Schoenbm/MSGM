@@ -103,9 +103,9 @@ def generate_agents(
         residential: bâtiments résidentiels avec `population_allouee`, `age_*` et
                      `csp_*` (sortie de allocate_population), Lambert-93, colonne `ID`.
         all_buildings: tous les bâtiments (buildings_all) — lieux de travail.
-        education:   équipements éducatifs OSM (colonnes `osm_id`, `kind`,
-                     géométrie ; cf. loaders.osm.fetch_osm_education). Si None,
-                     les enfants reçoivent une activité mais aucune destination.
+        education:   équipements éducatifs (colonnes `equip_id`, `kind`, géométrie,
+                     `capacity` optionnelle ; cf. loaders.bpe.load_bpe_education).
+                     Si None, les enfants reçoivent une activité mais aucune destination.
         usages:      valeurs USAGE retenues comme lieux de travail.
         decay_m:     échelle de décroissance distance pour le travail (m).
         education_decay_m: idem pour école/crèche (plus court : on scolarise au
@@ -199,10 +199,10 @@ def generate_agents(
     # générique quand aucun établissement n'est explicitement nommé/typé.
     plans = [
         (ACT_TRAVAIL, workplaces, "ID", "lieu de travail", decay_m),
-        (ACT_CRECHE, _education_subset(education, ACT_CRECHE, crs), "osm_id", "crèche", education_decay_m),
-        (ACT_ECOLE, _education_subset(education, ACT_ECOLE, crs), "osm_id", "école", education_decay_m),
-        (ACT_COLLEGE, _education_subset(education, ACT_COLLEGE, crs, fallback=ACT_ECOLE), "osm_id", "collège", education_decay_m),
-        (ACT_LYCEE, _education_subset(education, ACT_LYCEE, crs, fallback=ACT_ECOLE), "osm_id", "lycée", education_decay_m),
+        (ACT_CRECHE, _education_subset(education, ACT_CRECHE, crs), "equip_id", "crèche", education_decay_m),
+        (ACT_ECOLE, _education_subset(education, ACT_ECOLE, crs), "equip_id", "école", education_decay_m),
+        (ACT_COLLEGE, _education_subset(education, ACT_COLLEGE, crs, fallback=ACT_ECOLE), "equip_id", "collège", education_decay_m),
+        (ACT_LYCEE, _education_subset(education, ACT_LYCEE, crs, fallback=ACT_ECOLE), "equip_id", "lycée", education_decay_m),
     ]
     for activity, facilities, id_col, label, decay in plans:
         sub = agents[agents["activity"] == activity]
@@ -255,7 +255,8 @@ def _education_subset(
         return None
     if sub.crs is not None and crs is not None and sub.crs != crs:
         sub = sub.to_crs(crs)
-    sub["capacity"] = 1.0
+    if "capacity" not in sub.columns:
+        sub["capacity"] = 1.0  # capacité inconnue → proximité dominante
     return sub
 
 

@@ -45,8 +45,8 @@ def _all_buildings(specs: list) -> gpd.GeoDataFrame:
 
 
 def _education(specs: list) -> gpd.GeoDataFrame:
-    """specs : (osm_id, kind, x, y)."""
-    rows = [{"osm_id": s[0], "kind": s[1], "geometry": Point(s[2], s[3])} for s in specs]
+    """specs : (equip_id, kind, x, y)."""
+    rows = [{"equip_id": s[0], "kind": s[1], "geometry": Point(s[2], s[3])} for s in specs]
     return gpd.GeoDataFrame(rows, geometry="geometry", crs=CRS)
 
 

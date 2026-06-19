@@ -7,7 +7,6 @@ import pytest
 from shapely.geometry import Polygon
 
 from src.loaders.osm import (
-    _classify_education,
     _max_not_null,
     _mode_not_null,
     _sum_not_null,
@@ -15,43 +14,6 @@ from src.loaders.osm import (
     _to_int,
     match_osm_to_bdtopo,
 )
-
-
-# ── Classification des équipements éducatifs ──────────────────────────────────
-
-def test_classify_education_creche_and_default_school():
-    assert _classify_education({"amenity": "kindergarten"}) == "creche"
-    # école générique (amenity=school sans nom/niveau) → primaire par défaut
-    assert _classify_education({"amenity": "school"}) == "ecole"
-
-
-def test_classify_education_levels_by_name():
-    assert _classify_education({"amenity": "school", "name": "Lycée Champollion"}) == "lycee"
-    assert _classify_education({"amenity": "school", "name": "Collège Stendhal"}) == "college"
-    assert _classify_education({"amenity": "school", "name": "École élémentaire Bizanet"}) == "ecole"
-
-
-def test_classify_education_levels_by_isced():
-    assert _classify_education({"amenity": "school", "isced:level": "3"}) == "lycee"
-    assert _classify_education({"amenity": "school", "isced:level": "2"}) == "college"
-    assert _classify_education({"amenity": "school", "isced:level": "1"}) == "ecole"
-
-
-def test_classify_education_building_fallback():
-    assert _classify_education({"building": "school"}) == "ecole"
-    assert _classify_education({"building": "kindergarten"}) == "creche"
-
-
-def test_classify_education_excludes_higher_ed():
-    # supérieur : nos agents scolarisés ont 3-17 ans, personne n'y va
-    assert _classify_education({"amenity": "university"}) is None
-    assert _classify_education({"amenity": "college"}) is None
-
-
-def test_classify_education_none_for_irrelevant_tags():
-    assert _classify_education({"amenity": "restaurant"}) is None
-    assert _classify_education({"building": "yes"}) is None
-    assert _classify_education({}) is None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
