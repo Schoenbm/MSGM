@@ -301,6 +301,7 @@ def step_env(verbose: bool = False, config_path: str = "config.yaml", assume_yes
     from src.loaders.roads import fetch_road_network
     from src.loaders.osm import fetch_osm_buildings
     from src.loaders.bpe import load_bpe_education
+    from src.loaders.bdnb import load_bdnb_employment_ids
     from src.loaders.buildings import load_buildings, load_all_buildings
     from src.matching.spatial_join import join_buildings_to_insee
     from src.matching.allocator import allocate_population
@@ -388,12 +389,16 @@ def step_env(verbose: bool = False, config_path: str = "config.yaml", assume_yes
     log.info("[6/7] Génération des agents")
     departement = grid["CODE_IRIS"].iloc[0][:2] if not grid.empty else "38"
     education = load_bpe_education(departement=departement)
+    # BDNB optionnelle : récupère des lieux de travail parmi les "Indifférencié".
+    bdnb_path = cfg.sources.get("bdnb")
+    workplace_extra_ids = load_bdnb_employment_ids(bdnb_path) if bdnb_path else set()
     agents = generate_agents(
         result, buildings_all, education=education,
         usages=cfg.workplace_usages,
         decay_m=cfg.workplace_decay_m,
         education_decay_m=cfg.education_decay_m,
         seed=cfg.workplace_seed,
+        workplace_extra_ids=workplace_extra_ids,
     )
     if not agents.empty:
         agents.to_file(out_dir / "agents.gpkg", driver="GPKG")

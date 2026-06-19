@@ -87,6 +87,7 @@ def generate_agents(
     decay_m: float = 3000.0,
     education_decay_m: float = 1200.0,
     seed: int = 42,
+    workplace_extra_ids: "set[str] | None" = None,
 ) -> gpd.GeoDataFrame:
     """Génère un GeoDataFrame d'agents individuels (domicile, âge, CSP, activité).
 
@@ -111,6 +112,8 @@ def generate_agents(
         education_decay_m: idem pour école/crèche (plus court : on scolarise au
                      plus proche).
         seed:        graine du tirage (reproductibilité).
+        workplace_extra_ids: ID BD TOPO d'emploi récupérés via la BDNB (étendent
+                     les lieux de travail au-delà des usages BD TOPO).
 
     Returns:
         GeoDataFrame, une ligne par agent. Colonnes : agent_id, home_id, age,
@@ -194,7 +197,7 @@ def generate_agents(
     for col in ("dest_x", "dest_y", "dist_m"):
         agents[col] = np.nan
 
-    workplaces = identify_workplaces(all_buildings, usages)
+    workplaces = identify_workplaces(all_buildings, usages, extra_ids=workplace_extra_ids)
     # Faute de niveau fiable dans OSM, collège/lycée retombent sur le pool "école"
     # générique quand aucun établissement n'est explicitement nommé/typé.
     plans = [

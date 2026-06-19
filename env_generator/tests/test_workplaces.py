@@ -50,6 +50,17 @@ def test_identify_workplaces_filters_and_capacity():
     assert wp["capacity"].iloc[0] == 400.0
 
 
+def test_identify_workplaces_extra_ids_recovers_indifferencie():
+    buildings = _all_buildings([
+        ("W1", "Commercial et services", 100, 0),
+        ("X1", "Indifférencié", 50, 0),   # exclu par usage
+        ("X2", "Indifférencié", 70, 0),   # exclu par usage
+    ])
+    wp = identify_workplaces(buildings, extra_ids={"X1"})
+    assert set(wp["ID"]) == {"W1", "X1"}   # X1 récupéré, X2 non
+    assert (wp["capacity"] > 0).all()
+
+
 def test_identify_workplaces_usage2_matches():
     buildings = _all_buildings([("W1", "Indifférencié", 0, 0)])
     buildings.loc[0, "USAGE2"] = "Industriel"

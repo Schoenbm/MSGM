@@ -15,6 +15,7 @@ sources:
   contours_iris: "./data/contour_iris.shp"        # 161 IRIS etude (Grenoble metro)
   buildings:     "./data/batim_grenoble.shp"      # BD TOPO bati (avec HAUTEUR)
   insee_filosofi: "./data/insee_metro_grenoble.shp"
+  bdnb:          "./data/BDNB/gpkg/bdnb.gpkg"      # optionnel : usage batiment -> lieux de travail (Indifferencie)
 
 # -- Sources distantes (telechargees si pas de fichier local) ---------------
 # NB : liees au millesime 2022. Les noms de colonnes INSEE (P22_/C22_) sont

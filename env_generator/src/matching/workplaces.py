@@ -59,10 +59,13 @@ DEFAULT_WORKPLACE_USAGES: tuple[str, ...] = (
 def identify_workplaces(
     all_buildings: gpd.GeoDataFrame,
     usages: "tuple[str, ...] | list[str]" = DEFAULT_WORKPLACE_USAGES,
+    extra_ids: "set[str] | None" = None,
 ) -> gpd.GeoDataFrame:
     """Sélectionne les bâtiments-lieux-de-travail et calcule leur capacité.
 
-    Un bâtiment est retenu si USAGE1 OU USAGE2 ∈ usages. Capacité = surface de
+    Un bâtiment est retenu si USAGE1 OU USAGE2 ∈ usages, OU si son `ID` figure
+    dans `extra_ids` (bâtiments d'emploi récupérés via la BDNB parmi les
+    « Indifférencié » BD TOPO — cf. loaders/bdnb.py). Capacité = surface de
     plancher (emprise au sol × nb d'étages), proxy du nombre d'emplois. Les
     bâtiments de capacité nulle (surface 0) sont écartés.
 
@@ -70,16 +73,21 @@ def identify_workplaces(
         all_buildings: tous les bâtiments de la zone (issu de buildings_all),
                        en Lambert-93 (surface en m²).
         usages:        valeurs USAGE considérées comme emploi.
+        extra_ids:     ID BD TOPO supplémentaires à inclure (source BDNB).
 
     Returns:
         GeoDataFrame des lieux de travail avec une colonne `capacity` (float).
     """
     usages = tuple(usages)
-    import pandas as pd
 
     usage1 = all_buildings.get("USAGE1", pd.Series(index=all_buildings.index, dtype=str))
     usage2 = all_buildings.get("USAGE2", pd.Series(index=all_buildings.index, dtype=str))
     mask = usage1.isin(usages) | usage2.isin(usages)
+    if extra_ids and "ID" in all_buildings.columns:
+        n_before = int(mask.sum())
+        mask = mask | all_buildings["ID"].isin(extra_ids)
+        logger.info("Lieux de travail : +%d récupérés via BDNB (usages BD TOPO : %d)",
+                    int(mask.sum()) - n_before, n_before)
 
     wp = all_buildings.loc[mask].copy()
     if wp.empty:

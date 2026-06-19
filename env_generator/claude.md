@@ -35,6 +35,7 @@ env_generator/
 │   │   ├── insee.py             # carreaux Filosofi (Ind_total)
 │   │   ├── roads.py             # réseau routier OSM (osmnx, walk/drive) -> Lambert-93
 │   │   ├── bpe.py               # BPE 2024 : équipements éducatifs géolocalisés (crèche/école/collège/lycée)
+│   │   ├── bdnb.py              # BDNB (CSTB) : usage bâtiment -> lieux de travail (récupère les Indifférencié)
 │   │   └── mobpro.py            # flux domicile-travail INSEE (MOBPRO 2022) — calage futur
 │   ├── matching/
 │   │   ├── spatial_join.py      # centroïdes bâtiments ↔ grille (porte les colonnes âge/CSP)
@@ -91,8 +92,11 @@ affecte par activité une destination tirée par `P(j|i) ∝ capacité_j × exp(
 / decay_m)`, réutilisé pour travail / école / crèche :
 - **travail** : bâtiments `buildings_all` dont `USAGE1`/`USAGE2` ∈
   `workplaces.usages` (défaut Commercial et services, Industriel, Agricole,
-  Religieux, Sportif ; **`Indifférencié` exclu** car ~35k bâtiments trop bruités —
-  à corriger) ; capacité = surface de plancher ; `workplaces.decay_m` (déf. 3000 m).
+  Religieux, Sportif), **+ récupération BDNB** : les bâtiments dont
+  `usage_principal_bdnb_open` ∈ {Tertiaire, Secondaire, Primaire} (passés via
+  `extra_ids`, cf. `loaders/bdnb.py`) rattrapent une partie des « Indifférencié »
+  exclus par la BD TOPO (~+4 500 lieux de travail sur la métropole). Capacité =
+  surface de plancher ; `workplaces.decay_m` (déf. 3000 m).
 - **crèche / école / collège / lycée** : équipements **BPE** géolocalisés
   (`loaders.bpe.load_bpe_education`, codes `TYPEQU` → niveau exact) ; capacité
   unité (la capacité d'accueil BPE n'est pas renseignée pour l'enseignement →
@@ -126,21 +130,23 @@ branché** : réservé au calage futur des `decay_m` (gravitaire non calibré).
 
 ## Sources de données (qui sert à quoi)
 
-| Source | Producteur | Accès / format | Loader | Rôle dans le pipeline | Statut |
+| Source | Millésime | Loader | Rôle dans le pipeline | Statut | Lien (vérif. millésime) |
 |---|---|---|---|---|---|
-| **BD TOPO — bâti** | IGN | `data/batim_grenoble.shp` (local) | `loaders/buildings.py` | **Socle du bâti** : géométrie, `USAGE1/2`, `NB_LOGTS`, `HAUTEUR`, `NB_ETAGES`. Bâtiments résidentiels (domiciles) + lieux de travail. | **Active — source principale du bâti** |
-| **CONTOURS-IRIS** | IGN | local `.shp` ou download 7z | `loaders/iris.py` | Géométries des IRIS (zones `population` et `region`). | Active |
-| **RP 2022 (base-ic pop + logement)** | INSEE | download zip CSV | `loaders/iris.py` | Démographie par IRIS : population, **âge** (`age_*`), **CSP** (`csp_*`), ménages. | Active |
-| **Filosofi (carreaux 200 m)** | INSEE | `data/insee_metro_grenoble.shp` | `loaders/insee.py` | Population carroyée (allocation `--source filosofi`). | Active (source alternative) |
-| **OSM — bâtiments** | OpenStreetMap (Overpass) | download/cache GeoJSON | `loaders/osm.py` | **Enrichissement** du bâti : `building:flats`/`levels` (estime `NB_LOGTS`), tag usage pour le filtre résidentiel. | Active — secondaire |
-| **OSM — réseau routier** | OpenStreetMap (osmnx) | download | `loaders/roads.py` | Réseau routier piéton + voiture (Lambert-93). | Active |
-| **BPE 2024** | INSEE | download zip CSV (~157 Mo) | `loaders/bpe.py` | **Équipements éducatifs géolocalisés** (codes `TYPEQU`) : destinations crèche/école/collège/lycée des agents enfants. | Active |
-| **MOBPRO 2022** | INSEE | download zip CSV (~11 Mo) | `loaders/mobpro.py` | Flux domicile-travail commune→commune. | **Réservée** — calage futur du gravitaire, non branchée |
-| **BDNB** | CSTB | `data/BDNB/gpkg/bdnb.gpkg` (2,5 Go) | *(aucun)* | Base consolidée du bâti (DPE, énergie, fichiers fonciers, liens BPE/BD TOPO). | **Non utilisée** — piste : DPE/usage pour affiner les lieux de travail (dégonfler `Indifférencié`). Ne porte **pas** le niveau scolaire (BPE le fait). |
+| **BD TOPO — bâti** (IGN) | local | `loaders/buildings.py` | **Socle du bâti** : géométrie, `USAGE1/2`, `NB_LOGTS`, `HAUTEUR`, `NB_ETAGES`. Domiciles + lieux de travail. | **Active — principale** | https://geoservices.ign.fr/bdtopo |
+| **CONTOURS-IRIS** (IGN) | 2024 | `loaders/iris.py` | Géométries des IRIS (zones `population` / `region`). | Active | https://geoservices.ign.fr/contoursiris |
+| **RP — base-ic pop + logement** (INSEE) | 2022 | `loaders/iris.py` | Démographie par IRIS : population, **âge** (`age_*`), **CSP** (`csp_*`), ménages. | Active | https://www.insee.fr/fr/statistiques/8647014 |
+| **Filosofi carroyé 200 m** (INSEE) | 2019 | `loaders/insee.py` | Population carroyée (allocation `--source filosofi`). | Active (alternative) | https://www.insee.fr/fr/statistiques/7655475 |
+| **OSM — bâtiments** (Overpass) | live | `loaders/osm.py` | **Enrichissement** du bâti : `building:flats`/`levels`, tag usage (filtre résidentiel). | Active — secondaire | https://www.openstreetmap.org |
+| **OSM — réseau routier** (osmnx) | live | `loaders/roads.py` | Réseau routier piéton + voiture (Lambert-93). | Active | https://www.openstreetmap.org |
+| **BPE** (INSEE) | 2024 | `loaders/bpe.py` | **Équipements éducatifs géolocalisés** (`TYPEQU`) : crèche/école/collège/lycée. | Active | https://www.insee.fr/fr/statistiques/8217525 |
+| **BDNB** (CSTB) | local (~2,5 Go) | `loaders/bdnb.py` | `usage_principal_bdnb_open` : **récupère des lieux de travail** parmi les « Indifférencié » BD TOPO (Tertiaire/Secondaire/Primaire). | **Active** (optionnelle) | https://bdnb.io |
+| **MOBPRO** (INSEE) | 2022 | `loaders/mobpro.py` | Flux domicile-travail commune→commune. | **Réservée** — calage futur, non branchée | https://www.insee.fr/fr/statistiques/8582949 |
 
 > Toutes les sources distantes passent par le **pipeline de cache unique**
 > (`loaders/cache.py`, `ensure_cached`). Millésimes couplés au code (RP/MOBPRO 2022,
 > BPE 2024, CONTOURS-IRIS 2024) — changer d'année demande de toucher loaders/URLs.
+> La BDNB est un fichier local hors dépôt : si absent, le pipeline tourne sans
+> (lieux de travail = BD TOPO seuls).
 
 ---
 
