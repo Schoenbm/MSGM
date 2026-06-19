@@ -301,7 +301,7 @@ def step_env(verbose: bool = False, config_path: str = "config.yaml", assume_yes
     from src.loaders.roads import fetch_road_network
     from src.loaders.osm import fetch_osm_buildings
     from src.loaders.bpe import load_bpe_education
-    from src.loaders.bdnb import load_bdnb_employment_ids
+    from src.loaders.bdnb import load_bdnb_building_usage, employment_ids
     from src.loaders.buildings import load_buildings, load_all_buildings
     from src.matching.spatial_join import join_buildings_to_insee
     from src.matching.allocator import allocate_population
@@ -373,12 +373,17 @@ def step_env(verbose: bool = False, config_path: str = "config.yaml", assume_yes
         edges.to_file(out_dir / f"roads_{nt}.gpkg", driver="GPKG")
         log.info("  réseau '%s' : %d arêtes", nt, len(edges))
 
-    # 4. Bâtiments dans l'emprise région (BD TOPO + enrichissement OSM)
+    # 4. Bâtiments dans l'emprise région (BD TOPO + enrichissement OSM + BDNB)
     log.info("[4/6] Bâtiments (région)")
     buildings_shp = cfg.sources.get("buildings", DATA_DIR / "batim_grenoble.shp")
     osm_gdf = fetch_osm_buildings(region_gdf, cache_dir=out_dir)
-    buildings = load_buildings(buildings_shp, study_area=region_gdf, osm_gdf=osm_gdf)
+    # BDNB optionnelle : qualifie les "Indifférencié" (résidentiel / travail / annexe).
+    bdnb_path = cfg.sources.get("bdnb")
+    bdnb_usage = load_bdnb_building_usage(bdnb_path) if bdnb_path else {}
+    buildings = load_buildings(buildings_shp, study_area=region_gdf, osm_gdf=osm_gdf,
+                               bdnb_usage=bdnb_usage)
     buildings_all = load_all_buildings(buildings_shp, study_area=region_gdf)
+    buildings_all["usage_bdnb"] = buildings_all["ID"].map(bdnb_usage)  # annotation (QGIS/GAMA)
 
     # 5. Allocation de la population aux bâtiments (sur la zone population)
     log.info("[5/7] Allocation population")
@@ -389,9 +394,8 @@ def step_env(verbose: bool = False, config_path: str = "config.yaml", assume_yes
     log.info("[6/7] Génération des agents")
     departement = grid["CODE_IRIS"].iloc[0][:2] if not grid.empty else "38"
     education = load_bpe_education(departement=departement)
-    # BDNB optionnelle : récupère des lieux de travail parmi les "Indifférencié".
-    bdnb_path = cfg.sources.get("bdnb")
-    workplace_extra_ids = load_bdnb_employment_ids(bdnb_path) if bdnb_path else set()
+    # Lieux de travail récupérés via la BDNB (catégorie "travail").
+    workplace_extra_ids = employment_ids(bdnb_usage)
     agents = generate_agents(
         result, buildings_all, education=education,
         usages=cfg.workplace_usages,

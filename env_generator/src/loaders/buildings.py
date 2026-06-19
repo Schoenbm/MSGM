@@ -73,6 +73,7 @@ def load_buildings(
     path: str | Path,
     study_area: "gpd.GeoDataFrame | None" = None,
     osm_gdf: "gpd.GeoDataFrame | None" = None,
+    bdnb_usage: "dict[str, str] | None" = None,
 ) -> gpd.GeoDataFrame:
     """Charge le shapefile bâtiments, filtre les résidentiels et estime NB_LOGTS.
 
@@ -84,6 +85,9 @@ def load_buildings(
         osm_gdf:    GeoDataFrame des bâtiments OSM (issu de fetch_osm_buildings).
                     Si fourni, enrichit les bâtiments avec building:flats et
                     building:levels via match_osm_to_bdtopo.
+        bdnb_usage: carte ID bâtiment → catégorie BDNB (`travail`/`residentiel`/
+                    `annexe`, cf. loaders/bdnb.py). Affine le filtre résidentiel
+                    pour les « Indifférencié ».
     """
     path = Path(path)
     logger.info("Chargement des bâtiments depuis %s", path)
@@ -100,7 +104,7 @@ def load_buildings(
         from src.loaders.osm import match_osm_to_bdtopo
         gdf = match_osm_to_bdtopo(gdf, osm_gdf)
 
-    gdf = filter_residential(gdf)
+    gdf = filter_residential(gdf, bdnb_usage=bdnb_usage)
     logger.info("%d bâtiments résidentiels conservés", len(gdf))
 
     gdf = estimate_nb_logts(gdf)
@@ -131,15 +135,21 @@ def _filter_by_study_area(
     return filtered
 
 
-def filter_residential(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    """Garde les bâtiments résidentiels selon USAGE1/USAGE2 puis vérifie sur OSM.
+def filter_residential(
+    gdf: gpd.GeoDataFrame,
+    bdnb_usage: "dict[str, str] | None" = None,
+) -> gpd.GeoDataFrame:
+    """Garde les bâtiments résidentiels selon USAGE1/USAGE2, OSM puis BDNB.
 
     Logique :
       1. ``USAGE1 == "Résidentiel"`` → toujours conservé (source BD_TOPO fiable)
-      2. Tous les autres bâtiments → vérification via le tag ``osm_building`` :
-         - tag résidentiel (OSM_RESIDENTIAL_TAGS)     → conservé
-         - tag non-résidentiel (OSM_NON_RESIDENTIAL_TAGS) → exclu
-         - pas de données OSM / tag inconnu → conservé uniquement si Indifférencié
+      2. Tous les autres bâtiments → croisement OSM + BDNB :
+         - tag OSM résidentiel **ou** BDNB ``residentiel``         → conservé
+         - tag OSM non-résidentiel **ou** BDNB ``travail``/``annexe`` → exclu
+         - sinon (usage inconnu) → conservé uniquement si ``Indifférencié``
+
+    `bdnb_usage` (carte ID → catégorie) affine le sort des « Indifférencié » :
+    sans elle, le comportement est strictement l'ancien (OSM seul).
     """
     import pandas as pd
 
@@ -150,31 +160,44 @@ def filter_residential(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
 
     # Cas 1 : BD_TOPO dit explicitement "Résidentiel"
     mask_bdtopo = (usage1 == "Résidentiel") | (usage1_null & (usage2 == "Résidentiel"))
-
-    # Cas 2 : tous les autres → vérification OSM
     others = ~mask_bdtopo
+
+    # Signal BDNB (vide si non fourni → n'altère pas l'ancien comportement).
+    if bdnb_usage and "ID" in gdf.columns:
+        cat = gdf["ID"].map(bdnb_usage)
+        bdnb_residential = cat == "residentiel"
+        bdnb_non_residential = cat.isin(["travail", "annexe"])
+    else:
+        bdnb_residential = pd.Series(False, index=gdf.index)
+        bdnb_non_residential = pd.Series(False, index=gdf.index)
 
     if "osm_building" in gdf.columns:
         osm_tag = gdf["osm_building"].fillna("").str.lower().str.strip()
         osm_is_residential = osm_tag.isin(OSM_RESIDENTIAL_TAGS)
         osm_is_non_residential = osm_tag.isin(OSM_NON_RESIDENTIAL_TAGS)
         osm_unknown = ~osm_is_residential & ~osm_is_non_residential
-
-        # Conserve si OSM dit résidentiel, ou si OSM inconnu et usage=Indifférencié
-        mask_others = others & (
-            osm_is_residential | (osm_unknown & (usage1 == "Indifférencié"))
-        )
-
-        n_osm_kept = int((others & osm_is_residential).sum())
-        n_osm_excluded = int((others & osm_is_non_residential).sum())
-        logger.info(
-            "Filtre OSM : +%d bâtiments non-Résidentiel reclassifiés résidentiels, "
-            "-%d exclus (tag OSM non-résidentiel)",
-            n_osm_kept, n_osm_excluded,
-        )
     else:
-        # Pas de données OSM : comportement précédent (uniquement Indifférencié)
-        mask_others = others & (usage1 == "Indifférencié")
+        osm_is_residential = pd.Series(False, index=gdf.index)
+        osm_is_non_residential = pd.Series(False, index=gdf.index)
+        osm_unknown = pd.Series(True, index=gdf.index)
+
+    # Conserve si un signal dit résidentiel, ou si usage inconnu (Indifférencié)
+    # sans aucun signal non-résidentiel (OSM ou BDNB).
+    mask_others = others & (
+        osm_is_residential
+        | bdnb_residential
+        | (osm_unknown & (usage1 == "Indifférencié")
+           & ~osm_is_non_residential & ~bdnb_non_residential)
+    )
+
+    logger.info(
+        "Filtre résidentiel (others) : +%d OSM-rés, +%d BDNB-rés, "
+        "-%d OSM-non-rés, -%d BDNB-non-rés",
+        int((others & osm_is_residential).sum()),
+        int((others & bdnb_residential).sum()),
+        int((others & osm_is_non_residential).sum()),
+        int((others & bdnb_non_residential).sum()),
+    )
 
     mask = mask_bdtopo | mask_others
     return gdf[mask].copy()

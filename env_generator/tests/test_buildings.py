@@ -547,3 +547,28 @@ class TestLoadAllBuildings:
         path = self._make_shp(tmp_path, [{"USAGE1": "Commercial", "USAGE2": "Bureaux"}])
         result = load_all_buildings(path)
         assert "USAGE1" in result.columns
+
+
+# ── filter_residential avec BDNB ──────────────────────────────────────────────
+
+class TestFilterResidentialBdnb:
+    def test_bdnb_excludes_indifferencie_non_residential(self):
+        gdf = _make_buildings([
+            {"ID": "A", "USAGE1": "Indifférencié"},   # BDNB travail -> exclu
+            {"ID": "B", "USAGE1": "Indifférencié"},   # BDNB annexe  -> exclu
+            {"ID": "C", "USAGE1": "Indifférencié"},   # BDNB inconnu -> gardé (défaut)
+        ])
+        usage = {"A": "travail", "B": "annexe"}
+        result = filter_residential(gdf, bdnb_usage=usage)
+        assert set(result["ID"]) == {"C"}
+
+    def test_bdnb_keeps_residential_non_indifferencie(self):
+        # USAGE BD TOPO non résidentiel mais BDNB dit résidentiel -> gardé
+        gdf = _make_buildings([{"ID": "A", "USAGE1": "Commercial"}])
+        result = filter_residential(gdf, bdnb_usage={"A": "residentiel"})
+        assert set(result["ID"]) == {"A"}
+
+    def test_without_bdnb_keeps_indifferencie_default(self):
+        gdf = _make_buildings([{"ID": "A", "USAGE1": "Indifférencié"}])
+        # sans BDNB : comportement inchangé (Indifférencié gardé)
+        assert set(filter_residential(gdf)["ID"]) == {"A"}

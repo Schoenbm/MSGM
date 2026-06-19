@@ -35,7 +35,7 @@ env_generator/
 │   │   ├── insee.py             # carreaux Filosofi (Ind_total)
 │   │   ├── roads.py             # réseau routier OSM (osmnx, walk/drive) -> Lambert-93
 │   │   ├── bpe.py               # BPE 2024 : équipements éducatifs géolocalisés (crèche/école/collège/lycée)
-│   │   ├── bdnb.py              # BDNB (CSTB) : usage bâtiment -> lieux de travail (récupère les Indifférencié)
+│   │   ├── bdnb.py              # BDNB (CSTB) : usage bâtiment (residentiel/travail/annexe) -> qualifie les Indifférencié
 │   │   └── mobpro.py            # flux domicile-travail INSEE (MOBPRO 2022) — calage futur
 │   ├── matching/
 │   │   ├── spatial_join.py      # centroïdes bâtiments ↔ grille (porte les colonnes âge/CSP)
@@ -107,6 +107,16 @@ Sortie : `agents.gpkg` / `agents.geojson` / `agents.csv` (colonnes : `agent_id`,
 `home_id`, `age`, `age_band`, `csp`, `activity`, `is_worker`, `dest_id`,
 `dest_x/y`, `dist_m`, géométrie = point domicile).
 
+**Qualification des bâtiments via BDNB (`loaders/bdnb.py`).** `usage_principal_bdnb_open`
+→ catégorie (`travail` / `residentiel` / `annexe`), carte ID bâtiment → catégorie
+consommée à deux endroits : (1) `filter_residential` exclut des **logements** les
+« Indifférencié » que la BDNB dit non-résidentiels (travail/annexe) et garde ceux
+dits résidentiels ; (2) `identify_workplaces` ajoute les bâtiments `travail`.
+`buildings_all` est annoté d'une colonne `usage_bdnb` (inspection QGIS/GAMA).
+Sur la métropole : ~+4 500 lieux de travail récupérés, ~4 000 faux logements
+écartés. NB : OSM ne couvre ici que les bâtiments tagués flats/levels (apport
+faible sur les Indifférencié) ; la BDNB fait l'essentiel.
+
 **Équipements éducatifs (`loaders/bpe.py`).** Source autoritaire (BPE 2024, INSEE) :
 `load_bpe_education(departement)` télécharge le fichier détail (~157 Mo, cache
 unique), filtre aux `TYPEQU` éducatifs (C107/108/109 → école, C201 → collège,
@@ -139,7 +149,7 @@ branché** : réservé au calage futur des `decay_m` (gravitaire non calibré).
 | **OSM — bâtiments** (Overpass) | live | `loaders/osm.py` | **Enrichissement** du bâti : `building:flats`/`levels`, tag usage (filtre résidentiel). | Active — secondaire | https://www.openstreetmap.org |
 | **OSM — réseau routier** (osmnx) | live | `loaders/roads.py` | Réseau routier piéton + voiture (Lambert-93). | Active | https://www.openstreetmap.org |
 | **BPE** (INSEE) | 2024 | `loaders/bpe.py` | **Équipements éducatifs géolocalisés** (`TYPEQU`) : crèche/école/collège/lycée. | Active | https://www.insee.fr/fr/statistiques/8217525 |
-| **BDNB** (CSTB) | local (~2,5 Go) | `loaders/bdnb.py` | `usage_principal_bdnb_open` : **récupère des lieux de travail** parmi les « Indifférencié » BD TOPO (Tertiaire/Secondaire/Primaire). | **Active** (optionnelle) | https://bdnb.io |
+| **BDNB** (CSTB) | local (~2,5 Go) | `loaders/bdnb.py` | `usage_principal_bdnb_open` → catégorie (travail / résidentiel / annexe) : **qualifie les « Indifférencié »** BD TOPO. Ajoute des lieux de travail ET affine le filtre résidentiel (exclut les faux logements). Annote `buildings_all` (`usage_bdnb`). | **Active** (optionnelle) | https://bdnb.io |
 | **MOBPRO** (INSEE) | 2022 | `loaders/mobpro.py` | Flux domicile-travail commune→commune. | **Réservée** — calage futur, non branchée | https://www.insee.fr/fr/statistiques/8582949 |
 
 > Toutes les sources distantes passent par le **pipeline de cache unique**
