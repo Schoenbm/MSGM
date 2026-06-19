@@ -79,9 +79,10 @@ ligne = un individu, avec domicile, âge, CSP, une **activité** et une destinat
   la tranche ; CSP des 18+ tirée dans les `csp_*` ; mineurs (<18) → `csp="mineur"` ;
 - **repli sur la distribution globale** quand un petit bâtiment a 0 dans chaque
   tranche (artefact du plus fort reste marge par marge) — évite les "inconnu" ;
-- **activité** (destination de jour) : 0-2 ans → `creche`, 3-17 ans → `ecole`,
-  18-62 ans actif occupé → `travail`, sinon (inactif, chômeur, **retraité > 62
-  ans**) → `aucune` (reste au domicile) ;
+- **activité** (destination de jour) : 0-2 → `creche`, 3-10 → `ecole`, 11-14 →
+  `college`, 15-17 → `lycee`, 18-62 actif occupé → `travail`, sinon (inactif,
+  chômeur, **retraité > 62 ans**) → `aucune`. Niveaux scolaires découpés par âge,
+  **répartition uniforme** (tirage d'âge uniforme dans la tranche INSEE) ;
 - contrôle de conservation : nb d'agents == `population_allouee` totale.
 
 `assign_facilities` (inspiré du localisateur `spll`/`GravityFunction` de Genstar) :
@@ -91,10 +92,13 @@ affecte par activité une destination tirée par `P(j|i) ∝ capacité_j × exp(
   `workplaces.usages` (défaut Commercial et services, Industriel, Agricole,
   Religieux, Sportif ; **`Indifférencié` exclu** car ~35k bâtiments trop bruités —
   à corriger) ; capacité = surface de plancher ; `workplaces.decay_m` (déf. 3000 m).
-- **école / crèche** : équipements OSM (`loaders.osm.fetch_osm_education`,
-  `amenity`/`building` = school/college/university → école, kindergarten →
-  crèche) ; capacité unité (proximité dominante) ; `education.decay_m` (déf. 1200 m,
-  plus court — on scolarise au plus proche).
+- **crèche / école / collège / lycée** : équipements OSM
+  (`loaders.osm.fetch_osm_education`) ; capacité unité (proximité dominante) ;
+  `education.decay_m` (déf. 1200 m, plus court — on scolarise au plus proche).
+  OSM ne séparant pas les niveaux (`amenity=school` partout), collège/lycée sont
+  identifiés par **nom** (« Collège … », « Lycée … ») et `isced:level`, avec repli
+  sur le pool « école » générique si aucun établissement typé. Le supérieur
+  (`college`/`university` OSM) est exclu (aucun agent > 17 ans scolarisé).
 
 Sortie : `agents.gpkg` / `agents.geojson` / `agents.csv` (colonnes : `agent_id`,
 `home_id`, `age`, `age_band`, `csp`, `activity`, `is_worker`, `dest_id`,
@@ -112,10 +116,11 @@ branché** : réservé au calage futur des `decay_m` (gravitaire non calibré).
 
 > Assomptions du premier jet (« on redesignera si besoin ») : âge et CSP tirés
 > comme marges indépendantes (pas de table jointe gospl/IPF) ; seuil adulte 18 ans
-> (15-17 ans en mineurs) ; retraite couperet à 62 ans ; école/crèche à capacité
-> uniforme (pas d'effectifs réels) et niveaux non distingués (primaire/collège/
-> lycée mélangés) ; pas de fuite hors région ni télétravail ; gravitaires non
-> calibrés. Voir les docstrings de `agents.py` / `workplaces.py`.
+> (15-17 ans en mineurs côté CSP) ; retraite couperet à 62 ans ; équipements
+> éducatifs à capacité uniforme (pas d'effectifs réels) ; niveaux scolaires
+> distingués par âge (répartition uniforme) et par nom/isced côté OSM (faillible) ;
+> pas de fuite hors région ni télétravail ; gravitaires non calibrés. Voir les
+> docstrings de `agents.py` / `workplaces.py`.
 
 ---
 

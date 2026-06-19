@@ -7,8 +7,10 @@ from shapely.geometry import Point, Polygon
 
 from src.matching.agents import (
     ACT_AUCUNE,
+    ACT_COLLEGE,
     ACT_CRECHE,
     ACT_ECOLE,
+    ACT_LYCEE,
     ACT_TRAVAIL,
     RETIREMENT_AGE,
     _classify_activity,
@@ -70,6 +72,31 @@ def test_children_go_to_creche_and_school():
     assert ecole["age"].between(3, 17).all()
     assert (creche["dest_id"] == "c1").all()
     assert (ecole["dest_id"] == "e1").all()
+
+
+def test_college_and_lycee_use_specific_facilities():
+    # tranche 11-17 → collège (11-14) + lycée (15-17)
+    res = _residential(40, {"age_11_17": 40}, {})
+    buildings = _all_buildings([("W1", "Industriel", 100, 0)])
+    edu = _education([("col", ACT_COLLEGE, 50, 0), ("lyc", ACT_LYCEE, 80, 0)])
+    agents = generate_agents(res, buildings, education=edu, seed=5)
+
+    col = agents[agents["activity"] == ACT_COLLEGE]
+    lyc = agents[agents["activity"] == ACT_LYCEE]
+    assert col["age"].between(11, 14).all()
+    assert lyc["age"].between(15, 17).all()
+    assert (col["dest_id"] == "col").all()
+    assert (lyc["dest_id"] == "lyc").all()
+
+
+def test_college_lycee_fall_back_to_ecole_pool():
+    # OSM ne fournit que des écoles génériques → collège/lycée y sont rattachés
+    res = _residential(40, {"age_11_17": 40}, {})
+    buildings = _all_buildings([("W1", "Industriel", 100, 0)])
+    edu = _education([("e1", ACT_ECOLE, 50, 0)])
+    agents = generate_agents(res, buildings, education=edu, seed=5)
+    school_age = agents[agents["activity"].isin([ACT_COLLEGE, ACT_LYCEE])]
+    assert (school_age["dest_id"] == "e1").all()
 
 
 def test_children_without_education_have_activity_but_no_dest():
@@ -159,13 +186,17 @@ def test_retirement_boundary_exactly_62_and_63():
 
 
 def test_activity_age_boundaries():
-    # 2 ans → crèche ; 3 ans → école ; 17 ans → école ; 18 ans inactif → aucune
+    # 2→crèche, 3 et 10→école, 11 et 14→collège, 15 et 17→lycée, 18 inactif→aucune
+    ages = [2, 3, 10, 11, 14, 15, 17, 18]
     agents = gpd.GeoDataFrame(
-        {"age": [2, 3, 17, 18], "csp": ["mineur", "mineur", "mineur", "csp_autres_inactifs"]},
-        geometry=[Point(0, 0)] * 4, crs=CRS,
+        {"age": ages, "csp": ["mineur"] * 7 + ["csp_autres_inactifs"]},
+        geometry=[Point(0, 0)] * len(ages), crs=CRS,
     )
     activity = _classify_activity(agents)
-    assert list(activity) == [ACT_CRECHE, ACT_ECOLE, ACT_ECOLE, ACT_AUCUNE]
+    assert list(activity) == [
+        ACT_CRECHE, ACT_ECOLE, ACT_ECOLE, ACT_COLLEGE, ACT_COLLEGE,
+        ACT_LYCEE, ACT_LYCEE, ACT_AUCUNE,
+    ]
 
 
 def test_global_fallback_avoids_unknown_age():

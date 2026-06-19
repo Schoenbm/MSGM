@@ -70,9 +70,16 @@ def fetch_osm_buildings(
 
 # ── Équipements éducatifs (crèches, écoles) ─────────────────────────────────────
 
-# Tags OSM → type d'équipement éducatif retenu pour les agents enfants.
-_EDU_CRECHE_TAGS = frozenset({"kindergarten"})           # crèche / maternelle
-_EDU_ECOLE_TAGS = frozenset({"school", "college", "university"})  # élémentaire → sup
+# Tags OSM des équipements éducatifs scolarisant des mineurs (≤ 17 ans).
+# NB : l'enseignement supérieur (amenity=college/university) est volontairement
+# exclu — nos agents scolarisés ont 3-17 ans, personne n'y va.
+_EDU_CRECHE_TAGS = frozenset({"kindergarten"})    # crèche / maternelle
+_EDU_SCHOOL_TAGS = frozenset({"school"})          # école / collège / lycée (indistincts dans OSM)
+
+# Mots-clés (noms d'établissement français) pour départager les niveaux, faute de
+# tag fiable dans OSM. amenity=school couvre primaire ET secondaire.
+_EDU_LYCEE_KEYWORDS = ("lycee", "lycée")
+_EDU_COLLEGE_KEYWORDS = ("college", "collège")
 
 
 def fetch_osm_education(
@@ -88,15 +95,17 @@ def fetch_osm_education(
 
     Colonnes (CRS = EPSG:4326) :
       - osm_id   : identifiant OSM (str, préfixé n/w pour éviter les collisions)
-      - kind     : "creche" ou "ecole"
+      - kind     : "creche", "ecole", "college" ou "lycee"
       - geometry : Point
 
-    Cache GeoJSON nommé d'après la bbox WGS84 arrondie (suffixe ``_edu``).
+    Cache GeoJSON nommé d'après la bbox WGS84 arrondie. Le suffixe ``v2`` reflète
+    le schéma de classification (4 niveaux) : changer la logique de classement
+    impose de bumper ce suffixe pour invalider les anciens caches.
     """
     cache_dir = Path(cache_dir)
     bbox = tuple(study_area.to_crs(4326).total_bounds)
     h = _bbox_hash(bbox)
-    cache_path = cache_dir / f"osm_education_{h}.geojson"
+    cache_path = cache_dir / f"osm_education_v2_{h}.geojson"
 
     def _produce(tmp: Path) -> None:
         logger.info("Téléchargement OSM équipements éducatifs -- bbox %s", [round(v, 4) for v in bbox])
@@ -114,14 +123,34 @@ def fetch_osm_education(
 
 
 def _classify_education(tags: dict) -> "str | None":
-    """Retourne 'creche', 'ecole' ou None selon les tags amenity/building."""
-    for key in ("amenity", "building"):
-        val = str(tags.get(key, "")).lower()
-        if val in _EDU_CRECHE_TAGS:
-            return "creche"
-        if val in _EDU_ECOLE_TAGS:
-            return "ecole"
-    return None
+    """Classe un équipement en 'creche', 'ecole', 'college', 'lycee' ou None.
+
+    crèche : amenity/building = kindergarten.
+    écoles/collèges/lycées : amenity/building = school, départagés par le nom de
+    l'établissement (« Lycée … », « Collège … ») puis par ``isced:level``
+    (2 = collège, 3 = lycée). À défaut → 'ecole' (primaire, cas le plus fréquent).
+    """
+    amenity = str(tags.get("amenity", "")).lower()
+    building = str(tags.get("building", "")).lower()
+
+    if amenity in _EDU_CRECHE_TAGS or building in _EDU_CRECHE_TAGS:
+        return "creche"
+    if amenity not in _EDU_SCHOOL_TAGS and building not in _EDU_SCHOOL_TAGS:
+        return None  # supérieur (college/university) ou non éducatif → ignoré
+
+    name = str(tags.get("name", "")).lower()
+    if any(k in name for k in _EDU_LYCEE_KEYWORDS):
+        return "lycee"
+    if any(k in name for k in _EDU_COLLEGE_KEYWORDS):
+        return "college"
+
+    isced = str(tags.get("isced:level", ""))
+    isced_levels = set(isced.replace("-", ";").replace(",", ";").split(";"))
+    if "3" in isced_levels:
+        return "lycee"
+    if "2" in isced_levels:
+        return "college"
+    return "ecole"
 
 
 def _query_overpass_education(bbox: tuple[float, float, float, float]) -> gpd.GeoDataFrame:
@@ -134,7 +163,7 @@ def _query_overpass_education(bbox: tuple[float, float, float, float]) -> gpd.Ge
     from shapely.geometry import Point
 
     minx, miny, maxx, maxy = bbox
-    amenity_re = "school|kindergarten|college|university"
+    amenity_re = "school|kindergarten"
     building_re = "school|kindergarten"
     query = f"""
 [out:json][timeout:180];

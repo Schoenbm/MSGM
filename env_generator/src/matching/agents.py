@@ -60,13 +60,21 @@ ALL_CSP_COLS: tuple[str, ...] = ACTIVE_CSP_COLS + ("csp_chomeurs_inactifs", "csp
 
 ADULT_MIN_AGE = 18
 MINOR_CSP = "mineur"
-CRECHE_MAX_AGE = 2        # 0-2 ans → crèche ; 3-17 ans → école
-SCHOOL_MAX_AGE = 17
 RETIREMENT_AGE = 62       # > 62 ans → à la retraite, pas de travail
+
+# Bornes d'âge des niveaux scolaires (système français). Répartition supposée
+# uniforme : l'âge entier est tiré uniformément dans la tranche INSEE, donc une
+# tranche à cheval (11-17) se scinde mécaniquement (collège 11-14, lycée 15-17).
+CRECHE_MAX_AGE = 2        # 0-2  → crèche
+ECOLE_MAX_AGE = 10        # 3-10 → école (maternelle + élémentaire)
+COLLEGE_MAX_AGE = 14      # 11-14 → collège
+LYCEE_MAX_AGE = 17        # 15-17 → lycée
 
 # Activités (destination de jour de l'agent en situation normale).
 ACT_CRECHE = "creche"
 ACT_ECOLE = "ecole"
+ACT_COLLEGE = "college"
+ACT_LYCEE = "lycee"
 ACT_TRAVAIL = "travail"
 ACT_AUCUNE = "aucune"     # inactifs, chômeurs, retraités → au domicile
 
@@ -83,9 +91,11 @@ def generate_agents(
     """Génère un GeoDataFrame d'agents individuels (domicile, âge, CSP, activité).
 
     Chaque agent reçoit une **activité** et, si elle s'y prête, une **destination**
-    (lieu de travail, école ou crèche) affectée par modèle gravitaire :
+    (lieu de travail / crèche / école / collège / lycée) affectée par gravité :
       - 0-2 ans            → crèche
-      - 3-17 ans           → école
+      - 3-10 ans           → école
+      - 11-14 ans          → collège
+      - 15-17 ans          → lycée
       - 18-62 ans actif    → travail
       - sinon (inactif, chômeur, retraité > 62 ans) → aucune (reste au domicile)
 
@@ -185,13 +195,14 @@ def generate_agents(
         agents[col] = np.nan
 
     workplaces = identify_workplaces(all_buildings, usages)
-    creches = _education_subset(education, ACT_CRECHE, crs)
-    ecoles = _education_subset(education, ACT_ECOLE, crs)
-
+    # Faute de niveau fiable dans OSM, collège/lycée retombent sur le pool "école"
+    # générique quand aucun établissement n'est explicitement nommé/typé.
     plans = [
         (ACT_TRAVAIL, workplaces, "ID", "lieu de travail", decay_m),
-        (ACT_ECOLE, ecoles, "osm_id", "école", education_decay_m),
-        (ACT_CRECHE, creches, "osm_id", "crèche", education_decay_m),
+        (ACT_CRECHE, _education_subset(education, ACT_CRECHE, crs), "osm_id", "crèche", education_decay_m),
+        (ACT_ECOLE, _education_subset(education, ACT_ECOLE, crs), "osm_id", "école", education_decay_m),
+        (ACT_COLLEGE, _education_subset(education, ACT_COLLEGE, crs, fallback=ACT_ECOLE), "osm_id", "collège", education_decay_m),
+        (ACT_LYCEE, _education_subset(education, ACT_LYCEE, crs, fallback=ACT_ECOLE), "osm_id", "lycée", education_decay_m),
     ]
     for activity, facilities, id_col, label, decay in plans:
         sub = agents[agents["activity"] == activity]
@@ -216,7 +227,9 @@ def _classify_activity(agents: gpd.GeoDataFrame) -> "np.ndarray":
 
     activity = np.full(len(agents), ACT_AUCUNE, dtype=object)
     activity[(age >= 0) & (age <= CRECHE_MAX_AGE)] = ACT_CRECHE
-    activity[(age > CRECHE_MAX_AGE) & (age <= SCHOOL_MAX_AGE)] = ACT_ECOLE
+    activity[(age > CRECHE_MAX_AGE) & (age <= ECOLE_MAX_AGE)] = ACT_ECOLE
+    activity[(age > ECOLE_MAX_AGE) & (age <= COLLEGE_MAX_AGE)] = ACT_COLLEGE
+    activity[(age > COLLEGE_MAX_AGE) & (age <= LYCEE_MAX_AGE)] = ACT_LYCEE
     # Travail : actif occupé, 18-62 ans (les > 62 ans sont à la retraite).
     activity[is_active_csp & (age >= ADULT_MIN_AGE) & (age <= RETIREMENT_AGE)] = ACT_TRAVAIL
     return activity
@@ -224,15 +237,20 @@ def _classify_activity(agents: gpd.GeoDataFrame) -> "np.ndarray":
 
 def _education_subset(
     education: "gpd.GeoDataFrame | None", kind: str, crs,
+    fallback: "str | None" = None,
 ) -> "gpd.GeoDataFrame | None":
     """Filtre les équipements éducatifs par type et leur ajoute une capacité unité.
 
     Faute de donnée de capacité OSM, chaque équipement pèse 1 : l'affectation est
     alors dominée par la proximité (les enfants vont au plus proche, à l'aléa près).
+    Si le type demandé est vide et qu'un `fallback` est fourni (ex. collège/lycée
+    non distingués dans OSM → pool "école" générique), on bascule dessus.
     """
     if education is None or education.empty or "kind" not in education.columns:
         return None
     sub = education[education["kind"] == kind].copy()
+    if sub.empty and fallback is not None:
+        sub = education[education["kind"] == fallback].copy()
     if sub.empty:
         return None
     if sub.crs is not None and crs is not None and sub.crs != crs:
