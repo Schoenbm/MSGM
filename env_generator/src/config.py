@@ -18,6 +18,7 @@ from pathlib import Path
 import yaml
 
 from src.loaders.iris import Selector
+from src.matching.workplaces import DEFAULT_WORKPLACE_USAGES
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,11 @@ class Config:
     contours_url: "str | None" = None
     insee_pop_url: "str | None" = None
     insee_logement_url: "str | None" = None
+    # Lieux de travail (modèle gravitaire). Voir matching/workplaces.py.
+    workplace_usages: "tuple[str, ...]" = DEFAULT_WORKPLACE_USAGES
+    workplace_decay_m: float = 3000.0
+    workplace_seed: int = 42
+    education_decay_m: float = 1200.0
 
 
 def _parse_zone(d: dict) -> ZoneConfig:
@@ -89,6 +95,10 @@ def load_config(path: "str | Path") -> Config:
 
     datasets = data.get("datasets") or {}
 
+    workplaces = data.get("workplaces") or {}
+    workplace_usages = tuple(workplaces.get("usages", DEFAULT_WORKPLACE_USAGES))
+    edu = data.get("education") or {}
+
     cfg = Config(
         crs=crs,
         sources=sources,
@@ -103,6 +113,10 @@ def load_config(path: "str | Path") -> Config:
         contours_url=datasets.get("contours_iris_url"),
         insee_pop_url=datasets.get("insee_pop_url"),
         insee_logement_url=datasets.get("insee_logement_url"),
+        workplace_usages=workplace_usages,
+        workplace_decay_m=float(workplaces.get("decay_m", 3000.0)),
+        workplace_seed=int(workplaces.get("seed", 42)),
+        education_decay_m=float(edu.get("decay_m", 1200.0)),
     )
     logger.info(
         "Config chargée : population=%s, region=%s(buffer=%.0fm), réseaux=%s",

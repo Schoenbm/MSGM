@@ -7,6 +7,7 @@ import pytest
 from shapely.geometry import Polygon
 
 from src.loaders.osm import (
+    _classify_education,
     _max_not_null,
     _mode_not_null,
     _sum_not_null,
@@ -14,6 +15,27 @@ from src.loaders.osm import (
     _to_int,
     match_osm_to_bdtopo,
 )
+
+
+# ── Classification des équipements éducatifs ──────────────────────────────────
+
+def test_classify_education_amenity():
+    assert _classify_education({"amenity": "kindergarten"}) == "creche"
+    assert _classify_education({"amenity": "school"}) == "ecole"
+    assert _classify_education({"amenity": "university"}) == "ecole"
+    assert _classify_education({"amenity": "college"}) == "ecole"
+
+
+def test_classify_education_building_fallback():
+    # pas d'amenity, on retombe sur le tag building
+    assert _classify_education({"building": "school"}) == "ecole"
+    assert _classify_education({"building": "kindergarten"}) == "creche"
+
+
+def test_classify_education_none_for_irrelevant_tags():
+    assert _classify_education({"amenity": "restaurant"}) is None
+    assert _classify_education({"building": "yes"}) is None
+    assert _classify_education({}) is None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

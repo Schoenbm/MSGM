@@ -68,6 +68,110 @@ def fetch_osm_buildings(
     return gdf
 
 
+# ── Équipements éducatifs (crèches, écoles) ─────────────────────────────────────
+
+# Tags OSM → type d'équipement éducatif retenu pour les agents enfants.
+_EDU_CRECHE_TAGS = frozenset({"kindergarten"})           # crèche / maternelle
+_EDU_ECOLE_TAGS = frozenset({"school", "college", "university"})  # élémentaire → sup
+
+
+def fetch_osm_education(
+    study_area: gpd.GeoDataFrame,
+    cache_dir: str | Path = Path("data/processed"),
+) -> gpd.GeoDataFrame:
+    """Télécharge les équipements éducatifs OSM (crèches, écoles) de la zone.
+
+    Requête Overpass distincte de ``fetch_osm_buildings`` : ici on cible les tags
+    ``amenity``/``building`` éducatifs (souvent absents du jeu bâti filtré sur
+    building:flats/levels). Chaque équipement est ramené à un **point** (le nœud,
+    ou le centre d'une emprise via ``out center``).
+
+    Colonnes (CRS = EPSG:4326) :
+      - osm_id   : identifiant OSM (str, préfixé n/w pour éviter les collisions)
+      - kind     : "creche" ou "ecole"
+      - geometry : Point
+
+    Cache GeoJSON nommé d'après la bbox WGS84 arrondie (suffixe ``_edu``).
+    """
+    cache_dir = Path(cache_dir)
+    bbox = tuple(study_area.to_crs(4326).total_bounds)
+    h = _bbox_hash(bbox)
+    cache_path = cache_dir / f"osm_education_{h}.geojson"
+
+    def _produce(tmp: Path) -> None:
+        logger.info("Téléchargement OSM équipements éducatifs -- bbox %s", [round(v, 4) for v in bbox])
+        gdf = _query_overpass_education(bbox)
+        gdf.to_file(tmp, driver="GeoJSON")
+        logger.info("Équipements éducatifs OSM téléchargés : %d", len(gdf))
+
+    ensure_cached(cache_path, produce=_produce, validate=valid_geofile, label=cache_path.name)
+
+    gdf = gpd.read_file(cache_path)
+    if "kind" in gdf.columns:
+        logger.info("Équipements éducatifs OSM : %s",
+                    gdf["kind"].value_counts().to_dict())
+    return gdf
+
+
+def _classify_education(tags: dict) -> "str | None":
+    """Retourne 'creche', 'ecole' ou None selon les tags amenity/building."""
+    for key in ("amenity", "building"):
+        val = str(tags.get(key, "")).lower()
+        if val in _EDU_CRECHE_TAGS:
+            return "creche"
+        if val in _EDU_ECOLE_TAGS:
+            return "ecole"
+    return None
+
+
+def _query_overpass_education(bbox: tuple[float, float, float, float]) -> gpd.GeoDataFrame:
+    """Interroge Overpass pour les équipements éducatifs (nœuds + emprises)."""
+    try:
+        import overpy
+    except ImportError:
+        raise ImportError("Le module overpy est requis : pip install overpy")
+
+    from shapely.geometry import Point
+
+    minx, miny, maxx, maxy = bbox
+    amenity_re = "school|kindergarten|college|university"
+    building_re = "school|kindergarten"
+    query = f"""
+[out:json][timeout:180];
+(
+  node["amenity"~"{amenity_re}"]({miny},{minx},{maxy},{maxx});
+  way["amenity"~"{amenity_re}"]({miny},{minx},{maxy},{maxx});
+  node["building"~"{building_re}"]({miny},{minx},{maxy},{maxx});
+  way["building"~"{building_re}"]({miny},{minx},{maxy},{maxx});
+);
+out center;
+"""
+    result = _run_overpass(query)
+
+    rows = []
+    for node in result.nodes:
+        kind = _classify_education(node.tags)
+        if kind is None:
+            continue
+        rows.append({"osm_id": f"n{node.id}", "kind": kind,
+                     "geometry": Point(float(node.lon), float(node.lat))})
+    for way in result.ways:
+        kind = _classify_education(way.tags)
+        if kind is None:
+            continue
+        lat = getattr(way, "center_lat", None)
+        lon = getattr(way, "center_lon", None)
+        if lat is None or lon is None:
+            continue
+        rows.append({"osm_id": f"w{way.id}", "kind": kind,
+                     "geometry": Point(float(lon), float(lat))})
+
+    if not rows:
+        logger.warning("Aucun équipement éducatif OSM trouvé dans la zone")
+        return gpd.GeoDataFrame(columns=["osm_id", "kind", "geometry"], crs=4326)
+    return gpd.GeoDataFrame(rows, crs=4326)
+
+
 # ── Requête Overpass ───────────────────────────────────────────────────────────
 
 _OVERPASS_ENDPOINTS = [
@@ -77,16 +181,34 @@ _OVERPASS_ENDPOINTS = [
 ]
 
 
-def _query_overpass(bbox: tuple[float, float, float, float]) -> gpd.GeoDataFrame:
-    """Interroge l'API Overpass pour tous les polygones bâtiments dans la bbox.
-
-    Tente jusqu'à 3 endpoints en cas de surcharge serveur (OverpassGatewayTimeout).
-    """
+def _run_overpass(query: str):
+    """Exécute une requête Overpass, en basculant sur 3 endpoints si surcharge."""
     try:
         import overpy
     except ImportError:
         raise ImportError("Le module overpy est requis : pip install overpy")
 
+    last_exc: Exception = RuntimeError("Aucun endpoint Overpass disponible")
+    for endpoint in _OVERPASS_ENDPOINTS:
+        try:
+            api = overpy.Overpass(url=endpoint)
+            logger.debug("Tentative Overpass : %s", endpoint)
+            result = api.query(query)
+            logger.debug("Succes via %s", endpoint)
+            return result
+        except Exception as exc:
+            logger.warning("Endpoint %s indisponible (%s), essai suivant...", endpoint, type(exc).__name__)
+            last_exc = exc
+    raise RuntimeError(
+        "Tous les serveurs Overpass sont surchargés. Réessayez dans quelques minutes."
+    ) from last_exc
+
+
+def _query_overpass(bbox: tuple[float, float, float, float]) -> gpd.GeoDataFrame:
+    """Interroge l'API Overpass pour tous les polygones bâtiments dans la bbox.
+
+    Tente jusqu'à 3 endpoints en cas de surcharge serveur (OverpassGatewayTimeout).
+    """
     minx, miny, maxx, maxy = bbox
     # On ne récupère que les bâtiments portant building:flats ou building:levels
     # pour maintenir la taille de la réponse raisonnable sur de grandes zones.
@@ -101,21 +223,7 @@ out body;
 >;
 out skel qt;
 """
-    last_exc: Exception = RuntimeError("Aucun endpoint Overpass disponible")
-    for endpoint in _OVERPASS_ENDPOINTS:
-        try:
-            api = overpy.Overpass(url=endpoint)
-            logger.debug("Tentative Overpass : %s", endpoint)
-            result = api.query(query)
-            logger.debug("Succes via %s", endpoint)
-            break
-        except Exception as exc:
-            logger.warning("Endpoint %s indisponible (%s), essai suivant...", endpoint, type(exc).__name__)
-            last_exc = exc
-    else:
-        raise RuntimeError(
-            "Tous les serveurs Overpass sont surchargés. Réessayez dans quelques minutes."
-        ) from last_exc
+    result = _run_overpass(query)
 
     from shapely.geometry import Polygon
 

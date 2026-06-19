@@ -53,6 +53,28 @@ network:
 buildings:
   source: bdtopo             # batim_grenoble (BD TOPO) + enrichissement OSM flats/levels
 
+# -- Lieux de travail (modele gravitaire) -----------------------------------
+# Un actif occupe (CSP en emploi) par batiment residentiel recoit un batiment
+# lieu-de-travail tire par P(j|i) ~ capacite_j * exp(-distance_ij / decay_m).
+# usages  : valeurs USAGE BD TOPO porteuses d'emploi. "Indifferencie" exclu par
+#           defaut (trop bruite). voir matching/workplaces.py.
+workplaces:
+  usages:
+    - "Commercial et services"
+    - "Industriel"
+    - "Agricole"
+    - "Religieux"
+    - "Sportif"
+  decay_m: 3000              # echelle de decroissance distance (m)
+  seed: 42                   # reproductibilite du tirage
+
+# -- Education (creches, ecoles) --------------------------------------------
+# Enfants 0-2 ans -> creche, 3-17 ans -> ecole (equipements OSM amenity=
+# school/kindergarten). decay plus court qu'au travail : on scolarise au plus
+# proche.
+education:
+  decay_m: 1200              # echelle de decroissance distance (m)
+
 # -- Sortie -----------------------------------------------------------------
 output:
   dir: "./data/processed/env"

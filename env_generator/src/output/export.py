@@ -104,6 +104,30 @@ def export_all_buildings(buildings: gpd.GeoDataFrame, output_dir: str | Path) ->
     )
 
 
+def export_agents(agents: gpd.GeoDataFrame, output_dir: str | Path) -> None:
+    """Export la population d'agents (domicile + âge + CSP + lieu de travail).
+
+    Produit dans output_dir :
+    - agents.geojson : points domicile + attributs (age, csp, activity, dest_id, ...)
+    - agents.csv     : mêmes attributs sans géométrie (dest_x/dest_y conservés)
+
+    Args:
+        agents:     GeoDataFrame issu de generate_agents.
+        output_dir: répertoire de sortie (créé si absent).
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if agents.empty:
+        logger.warning("Aucun agent à exporter — fichiers agents non écrits")
+        return
+
+    agents = _sanitize_for_export(agents)
+    _write_geojson(agents, output_dir / "agents.geojson")
+    _write_csv(agents.drop(columns=["geometry"]), output_dir / "agents.csv")
+    logger.info("Export agents : %d lignes -> %s", len(agents), output_dir)
+
+
 def _sanitize_for_export(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """Convert problematic dtypes (datetime, object with mixed types) for GeoJSON."""
     result = gdf.copy()

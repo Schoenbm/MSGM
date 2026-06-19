@@ -299,11 +299,12 @@ def step_env(verbose: bool = False, config_path: str = "config.yaml", assume_yes
     from src.config import load_config
     from src.loaders.iris import load_iris, resolve_zone, validate_subset, MissingIrisError
     from src.loaders.roads import fetch_road_network
-    from src.loaders.osm import fetch_osm_buildings
+    from src.loaders.osm import fetch_osm_buildings, fetch_osm_education
     from src.loaders.buildings import load_buildings, load_all_buildings
     from src.matching.spatial_join import join_buildings_to_insee
     from src.matching.allocator import allocate_population
-    from src.output.export import export_results, export_all_buildings
+    from src.matching.agents import generate_agents
+    from src.output.export import export_results, export_all_buildings, export_agents
 
     cfg = load_config(config_path)
     out_dir = cfg.output_dir
@@ -378,14 +379,28 @@ def step_env(verbose: bool = False, config_path: str = "config.yaml", assume_yes
     buildings_all = load_all_buildings(buildings_shp, study_area=region_gdf)
 
     # 5. Allocation de la population aux bâtiments (sur la zone population)
-    log.info("[5/6] Allocation population")
+    log.info("[5/7] Allocation population")
     joined = join_buildings_to_insee(buildings, grid)
     result = allocate_population(joined)
 
-    # 6. Export pour GAMA
-    log.info("[6/6] Export")
+    # 6. Génération des agents (âge + CSP + domicile + destination travail/école/crèche)
+    log.info("[6/7] Génération des agents")
+    education = fetch_osm_education(region_gdf, cache_dir=out_dir)
+    agents = generate_agents(
+        result, buildings_all, education=education,
+        usages=cfg.workplace_usages,
+        decay_m=cfg.workplace_decay_m,
+        education_decay_m=cfg.education_decay_m,
+        seed=cfg.workplace_seed,
+    )
+    if not agents.empty:
+        agents.to_file(out_dir / "agents.gpkg", driver="GPKG")
+
+    # 7. Export pour GAMA
+    log.info("[7/7] Export")
     export_results(result, out_dir)
     export_all_buildings(buildings_all, out_dir)
+    export_agents(agents, out_dir)
     log.info("=== Environnement généré dans %s ===", out_dir)
 
 

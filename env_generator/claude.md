@@ -30,13 +30,16 @@ env_generator/
 │   ├── config.py                # lecture config.yaml (Config, ZoneConfig)
 │   ├── loaders/
 │   │   ├── iris.py              # CONTOURS-IRIS + INSEE RP 2022 ; Selector, resolve_zone, validate_subset
-│   │   ├── osm.py               # enrichissement bâtiments OSM (flats/levels) via Overpass
+│   │   ├── osm.py               # OSM via Overpass : bâtiments (flats/levels) + équipements éducatifs
 │   │   ├── buildings.py         # BD TOPO : filtre résidentiel, NB_LOGTS, load_all_buildings
 │   │   ├── insee.py             # carreaux Filosofi (Ind_total)
 │   │   └── roads.py             # réseau routier OSM (osmnx, walk/drive) -> Lambert-93
+│   │   ├── mobpro.py            # flux domicile-travail INSEE (MOBPRO 2022) — calage futur
 │   ├── matching/
 │   │   ├── spatial_join.py      # centroïdes bâtiments ↔ grille (porte les colonnes âge/CSP)
-│   │   └── allocator.py         # allocation pop/ménages + âge/CSP (plus fort reste)
+│   │   ├── allocator.py         # allocation pop/ménages + âge/CSP (plus fort reste)
+│   │   ├── agents.py            # génère les individus (âge + CSP + domicile + travail)
+│   │   └── workplaces.py        # affectation gravitaire d'un lieu de travail aux actifs
 │   ├── output/
 │   │   ├── export.py            # GeoJSON + CSV + Shapefile ; export_all_buildings
 │   │   ├── visualize.py         # carte
@@ -65,6 +68,54 @@ filtrés sur la région + enrichissement OSM → `allocate_population` → expor
 La carte (région) plus grande que la zone peuplée est une **feature** voulue :
 les bâtiments hors zone population reçoivent `population = 0` (attendu, pas une
 erreur).
+
+**Population d'agents (`matching/agents.py` + `workplaces.py`, étape 6 de
+`--step env`).** Descend de l'agrégat-par-bâtiment au **grain individuel** : une
+ligne = un individu, avec domicile, âge, CSP, une **activité** et une destination.
+
+`generate_agents` (microsimulation par tirage, PAS un IPF) :
+- 1 agent par tête de `population_allouee` du bâtiment résidentiel ;
+- âge tiré dans les tranches `age_*` (multinomiale ∝ effectifs) + âge entier dans
+  la tranche ; CSP des 18+ tirée dans les `csp_*` ; mineurs (<18) → `csp="mineur"` ;
+- **repli sur la distribution globale** quand un petit bâtiment a 0 dans chaque
+  tranche (artefact du plus fort reste marge par marge) — évite les "inconnu" ;
+- **activité** (destination de jour) : 0-2 ans → `creche`, 3-17 ans → `ecole`,
+  18-62 ans actif occupé → `travail`, sinon (inactif, chômeur, **retraité > 62
+  ans**) → `aucune` (reste au domicile) ;
+- contrôle de conservation : nb d'agents == `population_allouee` totale.
+
+`assign_facilities` (inspiré du localisateur `spll`/`GravityFunction` de Genstar) :
+affecte par activité une destination tirée par `P(j|i) ∝ capacité_j × exp(-dist_ij
+/ decay_m)`, réutilisé pour travail / école / crèche :
+- **travail** : bâtiments `buildings_all` dont `USAGE1`/`USAGE2` ∈
+  `workplaces.usages` (défaut Commercial et services, Industriel, Agricole,
+  Religieux, Sportif ; **`Indifférencié` exclu** car ~35k bâtiments trop bruités —
+  à corriger) ; capacité = surface de plancher ; `workplaces.decay_m` (déf. 3000 m).
+- **école / crèche** : équipements OSM (`loaders.osm.fetch_osm_education`,
+  `amenity`/`building` = school/college/university → école, kindergarten →
+  crèche) ; capacité unité (proximité dominante) ; `education.decay_m` (déf. 1200 m,
+  plus court — on scolarise au plus proche).
+
+Sortie : `agents.gpkg` / `agents.geojson` / `agents.csv` (colonnes : `agent_id`,
+`home_id`, `age`, `age_band`, `csp`, `activity`, `is_worker`, `dest_id`,
+`dest_x/y`, `dist_m`, géométrie = point domicile).
+
+**Équipements éducatifs (`loaders/osm.py::fetch_osm_education`).** Requête Overpass
+**distincte** de `fetch_osm_buildings` (qui ne ramène que building:flats/levels) :
+cible les tags éducatifs, ramène chaque équipement à un point (`out center`), cache
+GeoJSON par bbox (`osm_education_<hash>.geojson`).
+
+**MOBPRO (`loaders/mobpro.py`).** Télécharge (via `ensure_cached`) la base de flux
+domicile-travail INSEE 2022 (commune→commune, ~11 Mo, `NBFLUX_C22_ACTOCC15P`).
+`load_mobpro(communes=[...])` filtre par commune de résidence. **Pas encore
+branché** : réservé au calage futur des `decay_m` (gravitaire non calibré).
+
+> Assomptions du premier jet (« on redesignera si besoin ») : âge et CSP tirés
+> comme marges indépendantes (pas de table jointe gospl/IPF) ; seuil adulte 18 ans
+> (15-17 ans en mineurs) ; retraite couperet à 62 ans ; école/crèche à capacité
+> uniforme (pas d'effectifs réels) et niveaux non distingués (primaire/collège/
+> lycée mélangés) ; pas de fuite hors région ni télétravail ; gravitaires non
+> calibrés. Voir les docstrings de `agents.py` / `workplaces.py`.
 
 ---
 
