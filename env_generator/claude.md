@@ -48,7 +48,7 @@ env_generator/
 │   │   ├── compare.py / compare_grid.py  # validation vs recensement
 │   │   └── casualties.py        # victimes/sans-abris depuis dommages D1..D5
 │   └── utils/logging_config.py
-└── tests/                       # pytest (~252 tests)
+└── tests/                       # pytest (~307 tests)
 ```
 
 > ⚠️ `loaders/osm.py` concerne les **bâtiments** (tags flats/levels), PAS le
@@ -112,6 +112,9 @@ Sortie : `agents.gpkg` / `agents.geojson` / `agents.csv` (colonnes : `agent_id`,
 consommée à deux endroits : (1) `filter_residential` exclut des **logements** les
 « Indifférencié » que la BDNB dit non-résidentiels (travail/annexe) et garde ceux
 dits résidentiels ; (2) `identify_workplaces` ajoute les bâtiments `travail`.
+`filter_residential` applique en plus une **porte de plausibilité par la taille**
+(`min_floor_area`, déf. 25 m²) qui écarte les abris/garages « Indifférencié » sans
+signal — générique, indépendante de la BDNB (cf. section « Indifférencié » plus bas).
 `buildings_all` est annoté d'une colonne `usage_bdnb` (inspection QGIS/GAMA).
 Sur la métropole : ~+4 500 lieux de travail récupérés, ~4 000 faux logements
 écartés. NB : OSM ne couvre ici que les bâtiments tagués flats/levels (apport
@@ -195,3 +198,85 @@ branché** : réservé au calage futur des `decay_m` (gravitaire non calibré).
   loaders réseau (osmnx/overpy) sont mockés dans les tests — pour la correctness
   réelle, faire un smoke test sur une petite emprise.
 - Commits : messages clairs, ne committer que sur demande.
+
+---
+
+## Chantier suivant — brancher MOBPRO (calage domicile-travail)
+
+Objectif : remplacer le `decay_m=3000 m` posé à la main par un calage sur les flux
+réels domicile-travail INSEE, pour des trajets d'agents réalistes.
+
+**État** : `loaders/mobpro.py` est écrit et **testé**, mais **non branché** dans le
+pipeline. La base est déjà en cache (`data/cache/mobpro-flux-2022.zip`).
+
+**API existante** : `load_mobpro(communes=None)` → DataFrame avec
+`CODGEO` (commune résidence), `DCLT` (commune travail), `NBFLUX_C22_ACTOCC15P`
+(nb d'actifs). `communes=[...]` filtre la commune de **résidence**.
+
+**Approche recommandée — affectation en 2 étapes** (Option B des échanges) :
+1. Pour un travailleur de commune `c`, tirer sa **commune de travail** `c'` selon
+   `P(c'|c) = NBFLUX(c,c') / Σ_c' NBFLUX(c,c')` (distribution MOBPRO).
+2. Dans `c'`, choisir le **bâtiment** précis par le gravitaire actuel
+   (capacité × exp(-dist/decay_m)) restreint aux lieux de travail de `c'`.
+Plus fidèle que de tout faire reposer sur la distance. (Option A plus légère :
+ne caler que `decay_m` sur la distribution de distances observée.)
+
+**Briques nécessaires / points d'intégration** :
+- **Commune d'un bâtiment** = `code_iris` → `str(int(x)).zfill(9)[:5]`. ⚠️ `code_iris`
+  est en **float** dans les sorties (ex. `384710000.0`) ; le `zfill(9)` gère les
+  départements < 10 (zéro de tête). Présent sur `result` (domiciles) **et**
+  `buildings_all` (lieux de travail).
+- `workplaces.identify_workplaces` renvoie déjà les lieux de travail ; il faudra
+  leur attacher leur commune (`code_iris[:5]`) pour les regrouper par `c'`.
+- Adapter `workplaces.assign_facilities` (ou ajouter une variante MOBPRO-aware)
+  pour : grouper les actifs par commune de domicile, tirer `c'` via MOBPRO, puis
+  gravité intra-`c'`. Garder le chemin actuel (sans MOBPRO) en repli.
+- Câbler dans `matching/agents.py` (passer la table MOBPRO / la matrice `P(c'|c)`)
+  et `main.py` `step_env` (charger via `load_mobpro(communes=<communes de la région>)`).
+  Les communes de la région = préfixes 5 des `CODE_IRIS` de la config `region`.
+
+**Décisions à trancher** :
+- **Flux sortant de la région** : MOBPRO enverra des actifs vers des communes hors
+  zone simulée. Choix : (a) clipper aux communes de la région + renormaliser
+  `P(c'|c)`, ou (b) modéliser un agent « travaille à l'extérieur » (sort de la
+  carte). Pour l'évacuation, (a) est plus simple ; (b) plus réaliste.
+- **Commune `c'` sans lieu de travail identifié** dans la zone (aucun bâtiment
+  emploi) → repli : gravité globale sur toute la région.
+- `decay_m` reste utile pour la gravité **intra-commune** (étape 2).
+
+**Validation** : comparer la distribution des distances domicile-travail générées
+et/ou la matrice de flux commune→commune des agents à MOBPRO (étalon).
+
+**Données** : millésime 2022 (couplé au code). Colonnes confirmées ci-dessus.
+
+## Indifférencié — état et leviers restants
+
+**Méthode corrigée (fait).** Le vrai problème n'était pas que les données : le
+filtre **fabriquait** des logements (défaut « Indifférencié → résidentiel » + plancher
+`NB_LOGTS ≥ 1`), donc le moindre abri de 9 m² absorbait de la population. Corrigé
+par une **porte de plausibilité d'habitation** dans `filter_residential`
+(`min_floor_area`, déf. 25 m² de plancher) : un « Indifférencié » sans signal positif
+n'est gardé comme logement que s'il est assez grand. **Générique** (taille = BD TOPO,
+aucune dépendance), reproductible : ~17 800 faux logements écartés sur la région
+(emprise médiane des Indifférencié peuplés : 17 m²). Sur la zone Île Verte, ~12 % de
+la population était allouée à des Indifférencié, concentrée sur peu de gros bâtiments.
+
+**Bases ouvertes épuisées pour le *fond*.** Tentatives mesurées et écartées :
+`ffo_bat_usage_niveau_1_txt` (+69), colonnes BDNB sup. equ/zoa/merimee (+334),
+requête OSM élargie shop/office/amenity (+116). Les petits Indifférencié restants
+sont de vrais abris/garages sans contenu — ne pas réinvestir là.
+
+**Leviers restants (génériques, optionnels), par ROI :**
+- **Adresse BAN** (via BDNB `nb_adresse_valid_ban`, déjà mesuré) : très discriminant
+  (166/246 Indifférencié peuplés sans adresse). Pourrait durcir la porte (taille ET
+  adresse) — mais couple le filtre à la BDNB (fichier optionnel). À garder hors du
+  cœur générique, comme raffinement quand la BDNB est présente.
+- **Imputation par voisins** pour le résidu des **gros** Indifférencié (≈50 ≥ 50 m²
+  peuplés sur la zone) : leur donner l'usage majoritaire du voisinage. Générique.
+- **Override manuel optionnel** (Solution 2) : CSV `ID → {résidentiel, travail,
+  inutile}` versionné, pour la poignée de très gros cas spécifiques (nouveaux
+  bureaux, bâtiments historiques) absents des bases. **Optionnel** : le programme
+  reste « pris tel quel » sans lui.
+- **SIRENE** (non testé) : établissements actifs géolocalisés + tranches d'effectifs
+  → renforcerait les **lieux de travail** ET donnerait une **capacité réelle**
+  (remplace le proxy uniforme). Autre objectif que les logements.

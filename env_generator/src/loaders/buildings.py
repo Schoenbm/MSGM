@@ -9,6 +9,10 @@ logger = logging.getLogger(__name__)
 SURFACE_MOY_DEFAULT: float = 160.0  # m² par logement volumique (surface × nb_étages / NB_LOGTS, médiane BDTopo Grenoble)
 HAUTEUR_PAR_ETAGE: float = 3.0     # m par étage (fallback)
 SURFACE_MIN_IRIS: int = 5          # nb min de bâtiments connus pour calibrer localement
+# Surface de plancher (emprise × nb étages) en-dessous de laquelle un bâtiment NON
+# explicitement résidentiel (BD TOPO/OSM/BDNB) n'est pas considéré habitable :
+# évite de fabriquer un logement à partir d'un abri/garage "Indifférencié".
+MIN_DWELLING_FLOOR_AREA: float = 25.0
 
 # Tags OSM indiquant un bâtiment résidentiel
 OSM_RESIDENTIAL_TAGS: frozenset[str] = frozenset({
@@ -74,6 +78,7 @@ def load_buildings(
     study_area: "gpd.GeoDataFrame | None" = None,
     osm_gdf: "gpd.GeoDataFrame | None" = None,
     bdnb_usage: "dict[str, str] | None" = None,
+    min_floor_area: float = MIN_DWELLING_FLOOR_AREA,
 ) -> gpd.GeoDataFrame:
     """Charge le shapefile bâtiments, filtre les résidentiels et estime NB_LOGTS.
 
@@ -88,6 +93,8 @@ def load_buildings(
         bdnb_usage: carte ID bâtiment → catégorie BDNB (`travail`/`residentiel`/
                     `annexe`, cf. loaders/bdnb.py). Affine le filtre résidentiel
                     pour les « Indifférencié ».
+        min_floor_area: surface de plancher minimale pour qu'un bâtiment non
+                    explicitement résidentiel soit jugé habitable (m²).
     """
     path = Path(path)
     logger.info("Chargement des bâtiments depuis %s", path)
@@ -104,7 +111,7 @@ def load_buildings(
         from src.loaders.osm import match_osm_to_bdtopo
         gdf = match_osm_to_bdtopo(gdf, osm_gdf)
 
-    gdf = filter_residential(gdf, bdnb_usage=bdnb_usage)
+    gdf = filter_residential(gdf, bdnb_usage=bdnb_usage, min_floor_area=min_floor_area)
     logger.info("%d bâtiments résidentiels conservés", len(gdf))
 
     gdf = estimate_nb_logts(gdf)
@@ -138,6 +145,7 @@ def _filter_by_study_area(
 def filter_residential(
     gdf: gpd.GeoDataFrame,
     bdnb_usage: "dict[str, str] | None" = None,
+    min_floor_area: float = MIN_DWELLING_FLOOR_AREA,
 ) -> gpd.GeoDataFrame:
     """Garde les bâtiments résidentiels selon USAGE1/USAGE2, OSM puis BDNB.
 
@@ -146,10 +154,12 @@ def filter_residential(
       2. Tous les autres bâtiments → croisement OSM + BDNB :
          - tag OSM résidentiel **ou** BDNB ``residentiel``         → conservé
          - tag OSM non-résidentiel **ou** BDNB ``travail``/``annexe`` → exclu
-         - sinon (usage inconnu) → conservé uniquement si ``Indifférencié``
+         - sinon (« Indifférencié » sans signal) → conservé **seulement si
+           plausiblement habitable** (surface de plancher ≥ ``min_floor_area``),
+           pour ne pas transformer un abri/garage en logement.
 
     `bdnb_usage` (carte ID → catégorie) affine le sort des « Indifférencié » :
-    sans elle, le comportement est strictement l'ancien (OSM seul).
+    sans elle, seul change le critère de taille (signal toujours disponible).
     """
     import pandas as pd
 
@@ -181,22 +191,31 @@ def filter_residential(
         osm_is_non_residential = pd.Series(False, index=gdf.index)
         osm_unknown = pd.Series(True, index=gdf.index)
 
-    # Conserve si un signal dit résidentiel, ou si usage inconnu (Indifférencié)
-    # sans aucun signal non-résidentiel (OSM ou BDNB).
+    # Plausibilité d'habitation par la taille (surface de plancher = emprise × étages).
+    floor_area = gdf.geometry.area * _compute_nb_etages(gdf)
+    plausible = floor_area >= min_floor_area
+
+    # Conserve si un signal POSITIF dit résidentiel (OSM/BDNB), ou si « Indifférencié »
+    # sans signal négatif ET plausiblement habitable.
     mask_others = others & (
         osm_is_residential
         | bdnb_residential
         | (osm_unknown & (usage1 == "Indifférencié")
-           & ~osm_is_non_residential & ~bdnb_non_residential)
+           & ~osm_is_non_residential & ~bdnb_non_residential & plausible)
     )
 
+    n_small_dropped = int(
+        (others & (usage1 == "Indifférencié") & osm_unknown
+         & ~osm_is_non_residential & ~bdnb_non_residential & ~plausible).sum()
+    )
     logger.info(
         "Filtre résidentiel (others) : +%d OSM-rés, +%d BDNB-rés, "
-        "-%d OSM-non-rés, -%d BDNB-non-rés",
+        "-%d OSM-non-rés, -%d BDNB-non-rés, -%d Indifférencié < %.0f m² (non habitable)",
         int((others & osm_is_residential).sum()),
         int((others & bdnb_residential).sum()),
         int((others & osm_is_non_residential).sum()),
         int((others & bdnb_non_residential).sum()),
+        n_small_dropped, min_floor_area,
     )
 
     mask = mask_bdtopo | mask_others

@@ -40,6 +40,7 @@ class Config:
     network_types: "tuple[str, ...]"
     network_simplify: bool
     buildings_source: str
+    buildings_min_floor_area: float
     output_dir: Path
     output_format: str
     raw: dict
@@ -107,6 +108,9 @@ def load_config(path: "str | Path") -> Config:
         network_types=network_types,
         network_simplify=bool(network.get("simplify", True)),
         buildings_source=(data.get("buildings") or {}).get("source", "bdtopo"),
+        buildings_min_floor_area=float(
+            (data.get("buildings") or {}).get("min_dwelling_floor_area_m2", 25.0)
+        ),
         output_dir=output_dir,
         output_format=output.get("format", "gpkg"),
         raw=data,

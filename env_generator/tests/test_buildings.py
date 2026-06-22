@@ -572,3 +572,30 @@ class TestFilterResidentialBdnb:
         gdf = _make_buildings([{"ID": "A", "USAGE1": "Indifférencié"}])
         # sans BDNB : comportement inchangé (Indifférencié gardé)
         assert set(filter_residential(gdf)["ID"]) == {"A"}
+
+
+# ── filter_residential : plausibilité par la taille ───────────────────────────
+
+class TestFilterResidentialSize:
+    def _bat(self, bid, usage1, size):
+        s = Polygon([(0, 0), (size, 0), (size, size), (0, size)])  # size² m² (1 étage)
+        return {"ID": bid, "USAGE1": usage1, "geometry": s}
+
+    def test_small_indifferencie_dropped(self):
+        gdf = _make_buildings([
+            self._bat("BIG", "Indifférencié", 8),    # 64 m² -> gardé
+            self._bat("SHED", "Indifférencié", 4),   # 16 m² -> exclu (< 25)
+        ])
+        result = filter_residential(gdf, min_floor_area=25.0)
+        assert set(result["ID"]) == {"BIG"}
+
+    def test_size_gate_does_not_touch_bdtopo_residential(self):
+        # un Résidentiel BD TOPO minuscule reste gardé (signal fiable)
+        gdf = _make_buildings([self._bat("R", "Résidentiel", 3)])  # 9 m²
+        assert set(filter_residential(gdf, min_floor_area=25.0)["ID"]) == {"R"}
+
+    def test_size_gate_does_not_touch_positive_signal(self):
+        # petit Indifférencié mais BDNB dit résidentiel -> gardé malgré la taille
+        gdf = _make_buildings([self._bat("A", "Indifférencié", 3)])  # 9 m²
+        result = filter_residential(gdf, bdnb_usage={"A": "residentiel"}, min_floor_area=25.0)
+        assert set(result["ID"]) == {"A"}

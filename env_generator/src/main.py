@@ -381,7 +381,8 @@ def step_env(verbose: bool = False, config_path: str = "config.yaml", assume_yes
     bdnb_path = cfg.sources.get("bdnb")
     bdnb_usage = load_bdnb_building_usage(bdnb_path) if bdnb_path else {}
     buildings = load_buildings(buildings_shp, study_area=region_gdf, osm_gdf=osm_gdf,
-                               bdnb_usage=bdnb_usage)
+                               bdnb_usage=bdnb_usage,
+                               min_floor_area=cfg.buildings_min_floor_area)
     buildings_all = load_all_buildings(buildings_shp, study_area=region_gdf)
     buildings_all["usage_bdnb"] = buildings_all["ID"].map(bdnb_usage)  # annotation (QGIS/GAMA)
 

@@ -53,6 +53,9 @@ network:
 # -- Batiments --------------------------------------------------------------
 buildings:
   source: bdtopo             # batim_grenoble (BD TOPO) + enrichissement OSM flats/levels
+  # Surface de plancher mini (emprise x etages) pour qu'un "Indifferencie" sans
+  # signal soit juge habitable : evite de transformer un abri/garage en logement.
+  min_dwelling_floor_area_m2: 25
 
 # -- Lieux de travail (modele gravitaire) -----------------------------------
 # Un actif occupe (CSP en emploi) par batiment residentiel recoit un batiment
