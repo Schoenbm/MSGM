@@ -7,56 +7,93 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 # Columns kept in the lightweight export
-_LIGHT_COLS = ["ID", "geometry", "population_allouee"]
+_LIGHT_COLS = ["ID", "geometry", "residentiel", "population_allouee"]
 
-# Columns dropped from the complete export (internal pipeline artifacts)
+# Columns dropped from the export (internal pipeline artifacts)
 _DROP_COLS = ["cell_idx"]
 
 
 # Shapefile column names are limited to 10 characters — map long names to short ones.
 _SHP_RENAME: dict[str, str] = {
     "population_allouee": "pop_allou",
+    "menages_alloues": "men_allou",
 }
 
 
-def export_results(result: gpd.GeoDataFrame, output_dir: str | Path) -> None:
-    """Export allocation results to GeoJSON, CSV, and Shapefile.
+def merge_buildings(
+    all_buildings: gpd.GeoDataFrame,
+    result: gpd.GeoDataFrame,
+) -> gpd.GeoDataFrame:
+    """Fusionne tous les bâtiments de la région avec l'allocation de population.
 
-    Produces six files in output_dir:
-    - buildings_light.geojson  : ID + geometry + population_allouee
-    - buildings_light.csv      : ID + population_allouee (no geometry)
-    - buildings_full.geojson   : all columns
-    - buildings_full.csv       : all columns except geometry
-    - buildings_light.shp (+sidecar files) : ID + geometry + pop_allou
-    - buildings_full.shp  (+sidecar files) : all columns, noms tronqués si > 10 chars
+    Produit **une seule** couche bâtiment : tous les bâtiments (`all_buildings`,
+    résidentiels + non-résidentiels) enrichis des colonnes d'allocation issues de
+    `result` (population, ménages, CSP, âge), jointes sur `ID`. Les non-logements
+    reçoivent `population = 0` et `residentiel = False`.
+
+    Remplace l'ancien couple `buildings_full` (résidentiels seuls) / `buildings_all`
+    (tous, sans population), dont la distinction prêtait à confusion.
 
     Args:
-        result: GeoDataFrame with population_allouee column.
-        output_dir: Directory where output files are written (created if absent).
+        all_buildings: tous les bâtiments de la région (géométrie + attributs +
+                       `usage_bdnb`), colonne `ID`.
+        result:        bâtiments résidentiels avec population allouée, colonne `ID`.
+
+    Returns:
+        GeoDataFrame de tous les bâtiments + colonnes d'allocation + `residentiel`.
+    """
+    res_ids = set(result["ID"])
+    demo = [c for c in result.columns if c.startswith("csp_") or c.startswith("age_")]
+    alloc_extra = ["population_allouee", "menages_alloues",
+                   "NB_LOGTS", "NB_LOGTS_source", "NB_LOGTS_ESTIME"]
+    alloc_cols = [c for c in alloc_extra + demo if c in result.columns]
+
+    base = all_buildings.copy()
+    # La NB_LOGTS estimée (result) prime sur la valeur brute BD TOPO (base).
+    if "NB_LOGTS" in alloc_cols and "NB_LOGTS" in base.columns:
+        base = base.drop(columns=["NB_LOGTS"])
+
+    merged = base.merge(result[["ID"] + alloc_cols], on="ID", how="left")
+    merged["residentiel"] = merged["ID"].isin(res_ids)
+
+    for c in ["population_allouee", "menages_alloues", *demo]:
+        if c in merged.columns:
+            merged[c] = merged[c].fillna(0)
+    return merged
+
+
+def export_buildings(buildings: gpd.GeoDataFrame, output_dir: str | Path) -> None:
+    """Exporte la couche bâtiment fusionnée (GeoJSON + CSV + Shapefile).
+
+    Produit dans output_dir :
+    - buildings.{geojson,csv,shp}        : tous les bâtiments, toutes colonnes
+      (population_allouee = 0 si non-logement, flag `residentiel`, `usage_bdnb`…)
+    - buildings_light.{geojson,csv,shp}  : ID + géométrie + residentiel +
+      population_allouee (+ CSP) — vue allégée.
+
+    Args:
+        buildings:  GeoDataFrame issu de merge_buildings.
+        output_dir: répertoire de sortie (créé si absent).
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # --- Lightweight ---
-    csp_cols = [c for c in result.columns if c.startswith("csp_")]
-    light_cols = _LIGHT_COLS + csp_cols
-    light = result[light_cols].copy()
+    full = buildings.drop(columns=[c for c in _DROP_COLS if c in buildings.columns])
+    full = _sanitize_for_export(full)
+    _write_geojson(full, output_dir / "buildings.geojson")
+    _write_csv(full.drop(columns=["geometry"]), output_dir / "buildings.csv")
+    _write_shp(full, output_dir / "buildings.shp")
+
+    csp_cols = [c for c in buildings.columns if c.startswith("csp_")]
+    light_cols = [c for c in _LIGHT_COLS if c in buildings.columns] + csp_cols
+    light = buildings[light_cols].copy()
     _write_geojson(light, output_dir / "buildings_light.geojson")
     _write_csv(light.drop(columns=["geometry"]), output_dir / "buildings_light.csv")
     _write_shp(light, output_dir / "buildings_light.shp")
 
-    # --- Complete ---
-    full = result.drop(columns=[c for c in _DROP_COLS if c in result.columns])
-    full = _sanitize_for_export(full)
-    _write_geojson(full, output_dir / "buildings_full.geojson")
-    _write_csv(full.drop(columns=["geometry"]), output_dir / "buildings_full.csv")
-    _write_shp(full, output_dir / "buildings_full.shp")
-
     logger.info(
-        "Export terminé dans %s  (light: %d lignes, full: %d colonnes)",
-        output_dir,
-        len(light),
-        len(full.columns),
+        "Export bâtiments dans %s  (%d bâtiments, %d colonnes ; dont %d logements)",
+        output_dir, len(full), len(full.columns), int(buildings["residentiel"].sum()),
     )
 
 
@@ -77,31 +114,6 @@ def _write_shp(gdf: gpd.GeoDataFrame, path: Path) -> None:
     gdf_shp = gdf.rename(columns=rename)
     gdf_shp.to_file(path, driver="ESRI Shapefile")
     logger.debug("Shapefile écrit : %s", path)
-
-
-def export_all_buildings(buildings: gpd.GeoDataFrame, output_dir: str | Path) -> None:
-    """Export all buildings (residential + non-residential) as Shapefile and GeoJSON.
-
-    Produces two files in output_dir:
-    - buildings_all.shp (+sidecar files) : tous les bâtiments de la zone d'étude
-    - buildings_all.geojson              : idem en GeoJSON
-
-    Args:
-        buildings: GeoDataFrame de tous les bâtiments (issu de buildings_all.gpkg).
-        output_dir: Répertoire de sortie (créé si absent).
-    """
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    buildings = _sanitize_for_export(buildings)
-    _write_shp(buildings, output_dir / "buildings_all.shp")
-    _write_geojson(buildings, output_dir / "buildings_all.geojson")
-
-    logger.info(
-        "Export tous bâtiments : %d bâtiments -> %s",
-        len(buildings),
-        output_dir,
-    )
 
 
 def export_agents(agents: gpd.GeoDataFrame, output_dir: str | Path) -> None:

@@ -155,7 +155,7 @@ def step_export(verbose: bool = False, source: str = "filosofi") -> None:
     log = logging.getLogger(__name__)
 
     import geopandas as gpd
-    from src.output.export import export_results, export_all_buildings
+    from src.output.export import merge_buildings, export_buildings
 
     log.info("=== STEP export (source=%s) ===", source)
     _, result_gpkg = _source_paths(source)
@@ -163,13 +163,14 @@ def step_export(verbose: bool = False, source: str = "filosofi") -> None:
 
     result = gpd.read_file(result_gpkg)
     out_dir = PROCESSED_DIR / source
-    export_results(result, out_dir)
 
     if BUILDINGS_ALL_GPKG.exists():
         buildings_all = gpd.read_file(BUILDINGS_ALL_GPKG)
-        export_all_buildings(buildings_all, out_dir)
     else:
-        log.warning("buildings_all.gpkg absent — relancer --step load pour l'obtenir")
+        log.warning("buildings_all.gpkg absent — couche bâtiment limitée aux résidentiels "
+                    "(relancer --step load pour inclure tous les bâtiments)")
+        buildings_all = result
+    export_buildings(merge_buildings(buildings_all, result), out_dir)
 
 
 def step_visualize(verbose: bool = False, source: str = "filosofi") -> None:
@@ -306,7 +307,7 @@ def step_env(verbose: bool = False, config_path: str = "config.yaml", assume_yes
     from src.matching.spatial_join import join_buildings_to_insee
     from src.matching.allocator import allocate_population
     from src.matching.agents import generate_agents
-    from src.output.export import export_results, export_all_buildings, export_agents
+    from src.output.export import merge_buildings, export_buildings, export_agents
 
     cfg = load_config(config_path)
     out_dir = cfg.output_dir
@@ -408,10 +409,9 @@ def step_env(verbose: bool = False, config_path: str = "config.yaml", assume_yes
     if not agents.empty:
         agents.to_file(out_dir / "agents.gpkg", driver="GPKG")
 
-    # 7. Export pour GAMA
+    # 7. Export pour GAMA — couche bâtiment unique (tous + population) + agents
     log.info("[7/7] Export")
-    export_results(result, out_dir)
-    export_all_buildings(buildings_all, out_dir)
+    export_buildings(merge_buildings(buildings_all, result), out_dir)
     export_agents(agents, out_dir)
     log.info("=== Environnement généré dans %s ===", out_dir)
 

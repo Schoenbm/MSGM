@@ -43,7 +43,7 @@ env_generator/
 │   │   ├── agents.py            # génère les individus (âge + CSP + domicile + travail)
 │   │   └── workplaces.py        # affectation gravitaire d'un lieu de travail aux actifs
 │   ├── output/
-│   │   ├── export.py            # GeoJSON + CSV + Shapefile ; export_all_buildings
+│   │   ├── export.py            # merge_buildings + export_buildings (couche unique) ; export_agents
 │   │   ├── visualize.py         # carte
 │   │   ├── compare.py / compare_grid.py  # validation vs recensement
 │   │   └── casualties.py        # victimes/sans-abris depuis dommages D1..D5
@@ -103,9 +103,16 @@ affecte par activité une destination tirée par `P(j|i) ∝ capacité_j × exp(
   proximité dominante) ; `education.decay_m` (déf. 1200 m, plus court — on
   scolarise au plus proche). Collège/lycée retombent sur le pool « école » si vide.
 
-Sortie : `agents.gpkg` / `agents.geojson` / `agents.csv` (colonnes : `agent_id`,
-`home_id`, `age`, `age_band`, `csp`, `activity`, `is_worker`, `dest_id`,
-`dest_x/y`, `dist_m`, géométrie = point domicile).
+Sorties (`output/export.py`) :
+- **`buildings.{geojson,csv,shp}`** — **couche bâtiment unique** : tous les bâtiments
+  de la région (`merge_buildings`), toutes colonnes, `population_allouee` (0 si
+  non-logement), flag `residentiel`, `usage_bdnb`, CSP/âge. Remplace l'ancien couple
+  `buildings_full` (résidentiels) / `buildings_all` (tous, sans pop) — distinction
+  source de confusion. `buildings_light.*` = vue allégée (ID + géom + residentiel +
+  population + CSP).
+- **`agents.gpkg` / `agents.geojson` / `agents.csv`** (colonnes : `agent_id`,
+  `home_id`, `age`, `age_band`, `csp`, `activity`, `is_worker`, `dest_id`,
+  `dest_x/y`, `dist_m`, géométrie = point domicile).
 
 **Qualification des bâtiments via BDNB (`loaders/bdnb.py`).** `usage_principal_bdnb_open`
 → catégorie (`travail` / `residentiel` / `annexe`), carte ID bâtiment → catégorie
@@ -115,7 +122,7 @@ dits résidentiels ; (2) `identify_workplaces` ajoute les bâtiments `travail`.
 `filter_residential` applique en plus une **porte de plausibilité par la taille**
 (`min_floor_area`, déf. 25 m²) qui écarte les abris/garages « Indifférencié » sans
 signal — générique, indépendante de la BDNB (cf. section « Indifférencié » plus bas).
-`buildings_all` est annoté d'une colonne `usage_bdnb` (inspection QGIS/GAMA).
+La couche bâtiment exportée porte une colonne `usage_bdnb` (inspection QGIS/GAMA).
 Sur la métropole : ~+4 500 lieux de travail récupérés, ~4 000 faux logements
 écartés. NB : OSM ne couvre ici que les bâtiments tagués flats/levels (apport
 faible sur les Indifférencié) ; la BDNB fait l'essentiel.
@@ -152,7 +159,7 @@ branché** : réservé au calage futur des `decay_m` (gravitaire non calibré).
 | **OSM — bâtiments** (Overpass) | live | `loaders/osm.py` | **Enrichissement** du bâti : `building:flats`/`levels`, tag usage (filtre résidentiel). | Active — secondaire | https://www.openstreetmap.org |
 | **OSM — réseau routier** (osmnx) | live | `loaders/roads.py` | Réseau routier piéton + voiture (Lambert-93). | Active | https://www.openstreetmap.org |
 | **BPE** (INSEE) | 2024 | `loaders/bpe.py` | **Équipements éducatifs géolocalisés** (`TYPEQU`) : crèche/école/collège/lycée. | Active | https://www.insee.fr/fr/statistiques/8217525 |
-| **BDNB** (CSTB) | local (~2,5 Go) | `loaders/bdnb.py` | `usage_principal_bdnb_open` → catégorie (travail / résidentiel / annexe) : **qualifie les « Indifférencié »** BD TOPO. Ajoute des lieux de travail ET affine le filtre résidentiel (exclut les faux logements). Annote `buildings_all` (`usage_bdnb`). | **Active** (optionnelle) | https://bdnb.io |
+| **BDNB** (CSTB) | local (~2,5 Go) | `loaders/bdnb.py` | `usage_principal_bdnb_open` → catégorie (travail / résidentiel / annexe) : **qualifie les « Indifférencié »** BD TOPO. Ajoute des lieux de travail ET affine le filtre résidentiel (exclut les faux logements). Annote la couche bâtiment (`usage_bdnb`). | **Active** (optionnelle) | https://bdnb.io |
 | **MOBPRO** (INSEE) | 2022 | `loaders/mobpro.py` | Flux domicile-travail commune→commune. | **Réservée** — calage futur, non branchée | https://www.insee.fr/fr/statistiques/8582949 |
 
 > Toutes les sources distantes passent par le **pipeline de cache unique**
