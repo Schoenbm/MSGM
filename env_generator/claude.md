@@ -256,6 +256,55 @@ et/ou la matrice de flux commune→commune des agents à MOBPRO (étalon).
 
 **Données** : millésime 2022 (couplé au code). Colonnes confirmées ci-dessus.
 
+---
+
+## Chantier — bâtiments stratégiques (équipements / POI évacuation)
+
+**Constat (vérifié).** Les grands bâtiments-clés de l'évacuation **ne sont PAS
+filtrés** — ils sont dans la couche `buildings`. Mais la BD TOPO *bâti* est **sans
+nom** : ils sortent en `Indifférencié` anonymes. Exemples mesurés : Hôtel de Ville
+de Grenoble = `BATIMENT…302526662`, Indifférencié 923 m² (BDNB → `travail`) ; Stade
+des Alpes = Indifférencié 3 989 m² (BDNB → `travail`). Présents, mais non
+**identifiables** comme mairie / stade / hôpital.
+
+**Objectif.** Tagger une **fonction stratégique** sur les bâtiments (colonne
+`fonction`/`poi_type` sur la couche `buildings`) : mairie/préfecture, hôpital/clinique,
+caserne pompiers (SDIS), police/gendarmerie, gare, lieu de culte, gymnase/stade,
+centre commercial, EHPAD… — pour modéliser PC de crise, refuges, points de
+rassemblement et populations vulnérables.
+
+**Lien thèse (important).** La cascade séisme→inondation porte l'injonction
+contradictoire **« évacuer les bâtiments » vs « évacuation verticale »**. D'où un
+attribut de **refuge vertical** : bâtiments hauts/robustes au-dessus de la cote
+d'inondation = refuges potentiels. La **hauteur** est déjà dispo (`HAUTEUR` /
+`NB_ETAGES`) → tagger l'aptitude au refuge vertical est directement utile aux QR.
+
+**Sources, par ROI :**
+1. **OSM amenities nommées** (quick win, gratuit, bien mappé pour les gros
+   équipements) : `amenity` ∈ {townhall, hospital, clinic, fire_station, police,
+   community_centre, place_of_worship, prefecture}, `leisure` ∈ {stadium,
+   sports_centre}, `railway=station` / `public_transport`, `emergency=*`,
+   `social_facility` (EHPAD). Méthode : requête Overpass (réutiliser `_run_overpass`)
+   + appariement au footprint BD TOPO par chevauchement (cf. `match_osm_to_bdtopo`),
+   nœud → point-in-polygon. Produit `poi_type` par bâtiment.
+2. **BDNB déjà en main** : `dpe_ter_categorie_erp_dpe_tertiaire` (1-5) +
+   `dpe_ter_type_erp_dpe_tertiaire` → **grands ERP** (cat 1-2 = fort accueil public,
+   ex. salles, commerces, enseignement) ; `monument_historique` / `merimee_*` →
+   patrimoine (les « bâtiments historiques » repérés par l'utilisateur).
+3. **BPE** (même mécanisme que `bpe.py` éducation) : santé (domaine D : hôpitaux,
+   EHPAD), sport (F), services publics (A). Géolocalisé, codes `TYPEQU` nets.
+4. **BD TOPO équipement / ZOA** (NATURE + toponyme : « Mairie », « Stade »,
+   « Hôpital »…) : autoritaire et déjà nommé, mais demande de charger la couche
+   *équipement/zone* complète (on n'a que le bâti). La BDNB l'expose en partie
+   (`bdtopo_equ_l_nature_detaillee` / `bdtopo_zoa_l_nature` / `_toponyme`) mais
+   **mal renseignée** sur la zone (mesuré : `bdtopo_equ_l_nature_detaillee` = 0).
+
+**Premier pas conseillé** : OSM (1) pour les landmarks à fort enjeu (hôpital,
+mairie, caserne, police, gare, stade, culte, gymnase) → colonne `fonction` sur
+`buildings` ; puis enrichir avec l'ERP/patrimoine BDNB (2, gratuit, en main) et un
+attribut **refuge vertical** dérivé de la hauteur. Capacité d'accueil (ERP / BPE /
+surface) si on veut dimensionner les refuges.
+
 ## Indifférencié — état et leviers restants
 
 **Méthode corrigée (fait).** Le vrai problème n'était pas que les données : le
