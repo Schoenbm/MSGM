@@ -8,6 +8,11 @@ jumeau numérique / l'ABM d'évacuation : **réseau routier** (piéton + voiture
 Module 1 de **MSGM** (`../`, Macro Sim of Grenoble Metro). Le modèle GAMA
 (simulateur) vit ailleurs et **consomme les sorties `.gpkg`** de ce module.
 
+> 📘 **Référence méthodo complète et lisible : [`METHODE.md`](METHODE.md)** — vue
+> d'ensemble, méthode étape par étape, paramètres, journal des décisions, pistes
+> écartées (avec preuves), hypothèses/limites, chantiers. À tenir à jour avec ce
+> fichier quand la méthode change.
+
 **CRS unique partout : Lambert-93 (EPSG:2154).** Non négociable (DT + standard
 France). Tout loader doit retourner du 2154.
 
