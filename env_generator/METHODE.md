@@ -168,6 +168,8 @@ Inspiré du localisateur `spll`/`GravityFunction` de Genstar.
 | `region.buffer_m` | 300 m | config.yaml | bordure de l'emprise (réseau de bord) |
 | `network.types` | walk, drive | config.yaml | réseaux routiers générés |
 | `buildings.min_dwelling_floor_area_m2` | 25 | config.yaml | porte de plausibilité d'habitation |
+| `buildings.absorb_slivers` | true | config.yaml | recolle les fragments (vitrines) aux gros voisins |
+| `SLIVER_MAX_AREA` / `_SNAP_TOL` / `_SIZE_RATIO` / `_BOUNDARY_SHARE` | 15 m² / 0,3 m / 5 / 0,5 | buildings.py | critères d'absorption d'un sliver |
 | `workplaces.usages` | Commercial/Industriel/Agricole/Religieux/Sportif | config.yaml | usages BD TOPO = lieux de travail |
 | `workplaces.decay_m` | 3000 | config.yaml | décroissance distance domicile-travail |
 | `workplaces.seed` | 42 | config.yaml | reproductibilité des tirages |
@@ -219,8 +221,9 @@ Inspiré du localisateur `spll`/`GravityFunction` de Genstar.
 - Pas de **fuite hors région** ni de **télétravail** ; tout actif travaille dans la zone.
 - ~23 000 Indifférencié restants laissés tels quels (structures sans contenu).
 - `code_iris` stocké en **float** dans les sorties (commune = `str(int(x)).zfill(9)[:5]`).
-- Sur-segmentation BD TOPO (vitrines/parties) **non traitée** (cf. § 9) : faible
-  impact sur la dynamique (domiciles co-localisés), réel sur le rendu/identité.
+- Sur-segmentation BD TOPO : les **slivers** (vitrines/avancées) sont recollés
+  (§ 9) ; la **sur-division de grandes parties comparables** est laissée telle
+  quelle (pas de fusion sûre sans risquer de coller des bâtiments distincts).
 
 ## 8. Chantiers à venir
 
@@ -231,13 +234,20 @@ Inspiré du localisateur `spll`/`GravityFunction` de Genstar.
    hôpital, caserne, gare, stade…) via OSM nommé + BDNB (ERP, monument historique) ;
    attribut **refuge vertical** (hauteur > cote inondation) — central pour la QR
    « évacuer vs évacuation verticale ». Notes dans `claude.md`.
-3. **Absorption de slivers** — cf. § 9 ci-dessous (plan à valider).
+3. ~~Absorption de slivers~~ — **fait** (§ 9).
 
 ---
 
-## 9. Plan de prototypage — absorption de slivers
+## 9. Absorption de slivers (implémenté)
 
-> **À valider avant codage.**
+> **Statut : implémenté** (`loaders/buildings.py::absorb_slivers`, branché dans
+> `step_env`, toggle `buildings.absorb_slivers` config, défaut `true`). Tests :
+> `tests/test_buildings.py::TestAbsorbSlivers`.
+>
+> **Résultat mesuré (région, `boundary_share=0.5`)** : **5 688 fragments recollés**
+> → 74 598 bâtiments, **surface bâtie conservée à 100,000 %** (que des unions de
+> jointifs, aucune géométrie inventée ni perdue → exits préservés). Sensibilité :
+> `0.4` → 7 109 ; `0.3` → 8 566.
 
 ### Problème
 La BD TOPO sur-segmente : (a) petits polygones-bruit (abris, < ~15 m²) ; (b)

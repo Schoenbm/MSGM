@@ -127,6 +127,9 @@ dits résidentiels ; (2) `identify_workplaces` ajoute les bâtiments `travail`.
 `filter_residential` applique en plus une **porte de plausibilité par la taille**
 (`min_floor_area`, déf. 25 m²) qui écarte les abris/garages « Indifférencié » sans
 signal — générique, indépendante de la BDNB (cf. section « Indifférencié » plus bas).
+En amont, `absorb_slivers` (toggle `buildings.absorb_slivers`) **recolle les petits
+fragments** (vitrines/avancées) à leur grand voisin jointif — dé-fragmentation
+conservatrice, surface conservée, exits préservés (cf. METHODE.md § 9).
 La couche bâtiment exportée porte une colonne `usage_bdnb` (inspection QGIS/GAMA).
 Sur la métropole : ~+4 500 lieux de travail récupérés, ~4 000 faux logements
 écartés. NB : OSM ne couvre ici que les bâtiments tagués flats/levels (apport

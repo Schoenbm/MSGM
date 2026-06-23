@@ -303,7 +303,7 @@ def step_env(verbose: bool = False, config_path: str = "config.yaml", assume_yes
     from src.loaders.osm import fetch_osm_buildings
     from src.loaders.bpe import load_bpe_education
     from src.loaders.bdnb import load_bdnb_building_usage, employment_ids
-    from src.loaders.buildings import load_buildings, load_all_buildings
+    from src.loaders.buildings import load_all_buildings, prepare_residential, absorb_slivers
     from src.matching.spatial_join import join_buildings_to_insee
     from src.matching.allocator import allocate_population
     from src.matching.agents import generate_agents
@@ -381,11 +381,16 @@ def step_env(verbose: bool = False, config_path: str = "config.yaml", assume_yes
     # BDNB optionnelle : qualifie les "Indifférencié" (résidentiel / travail / annexe).
     bdnb_path = cfg.sources.get("bdnb")
     bdnb_usage = load_bdnb_building_usage(bdnb_path) if bdnb_path else {}
-    buildings = load_buildings(buildings_shp, study_area=region_gdf, osm_gdf=osm_gdf,
-                               bdnb_usage=bdnb_usage,
-                               min_floor_area=cfg.buildings_min_floor_area)
+
+    # Charge le bâti une seule fois, dé-fragmente (slivers) sur le set complet, puis
+    # dérive résidentiels et tous-bâtiments de la MÊME géométrie nettoyée.
     buildings_all = load_all_buildings(buildings_shp, study_area=region_gdf)
+    if cfg.buildings_absorb_slivers:
+        buildings_all, _ = absorb_slivers(buildings_all)
     buildings_all["usage_bdnb"] = buildings_all["ID"].map(bdnb_usage)  # annotation (QGIS/GAMA)
+    buildings = prepare_residential(buildings_all, osm_gdf=osm_gdf,
+                                    bdnb_usage=bdnb_usage,
+                                    min_floor_area=cfg.buildings_min_floor_area)
 
     # 5. Allocation de la population aux bâtiments (sur la zone population)
     log.info("[5/7] Allocation population")

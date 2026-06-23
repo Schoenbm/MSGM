@@ -41,6 +41,7 @@ class Config:
     network_simplify: bool
     buildings_source: str
     buildings_min_floor_area: float
+    buildings_absorb_slivers: bool
     output_dir: Path
     output_format: str
     raw: dict
@@ -110,6 +111,9 @@ def load_config(path: "str | Path") -> Config:
         buildings_source=(data.get("buildings") or {}).get("source", "bdtopo"),
         buildings_min_floor_area=float(
             (data.get("buildings") or {}).get("min_dwelling_floor_area_m2", 25.0)
+        ),
+        buildings_absorb_slivers=bool(
+            (data.get("buildings") or {}).get("absorb_slivers", True)
         ),
         output_dir=output_dir,
         output_format=output.get("format", "gpkg"),

@@ -14,6 +14,15 @@ SURFACE_MIN_IRIS: int = 5          # nb min de bâtiments connus pour calibrer l
 # évite de fabriquer un logement à partir d'un abri/garage "Indifférencié".
 MIN_DWELLING_FLOOR_AREA: float = 25.0
 
+# --- Absorption de slivers (dé-fragmentation conservatrice de la BD TOPO) -------
+# Un petit fragment (vitrine/avancée comptée à part) est recollé à son grand voisin
+# jointif. On ne fusionne JAMAIS deux bâtiments de taille comparable (mitoyens) ni
+# en pontant un gap → les exits sont préservés. Cf. METHODE.md § 9.
+SLIVER_MAX_AREA: float = 15.0       # surface plancher max d'un sliver (m²)
+SLIVER_SNAP_TOL: float = 0.3        # tolérance "collé" (m)
+SLIVER_SIZE_RATIO: float = 5.0      # le voisin-hôte doit être ≥ ratio × le sliver
+SLIVER_BOUNDARY_SHARE: float = 0.5  # part mini du contour du sliver partagée avec l'hôte
+
 # Tags OSM indiquant un bâtiment résidentiel
 OSM_RESIDENTIAL_TAGS: frozenset[str] = frozenset({
     "residential", "apartments", "house", "detached", "semidetached_house",
@@ -96,17 +105,23 @@ def load_buildings(
         min_floor_area: surface de plancher minimale pour qu'un bâtiment non
                     explicitement résidentiel soit jugé habitable (m²).
     """
-    path = Path(path)
-    logger.info("Chargement des bâtiments depuis %s", path)
+    gdf = load_all_buildings(path, study_area=study_area)
+    return prepare_residential(gdf, osm_gdf=osm_gdf, bdnb_usage=bdnb_usage,
+                               min_floor_area=min_floor_area)
 
-    gdf = gpd.read_file(path)
-    gdf = _fix_encoding(gdf)
-    logger.info("CRS : %s — %d bâtiments au total", gdf.crs, len(gdf))
 
-    if study_area is not None:
-        gdf = _filter_by_study_area(gdf, study_area)
+def prepare_residential(
+    gdf: gpd.GeoDataFrame,
+    osm_gdf: "gpd.GeoDataFrame | None" = None,
+    bdnb_usage: "dict[str, str] | None" = None,
+    min_floor_area: float = MIN_DWELLING_FLOOR_AREA,
+) -> gpd.GeoDataFrame:
+    """Filtre les résidentiels et estime NB_LOGTS sur un bâti déjà chargé.
 
-    # Appariement OSM en premier : fournit osm_building pour le filtre résidentiel
+    Permet de partir d'un bâti **déjà nettoyé** (ex. après `absorb_slivers`) sans
+    relire le shapefile, pour que le résidentiel et la couche « tous bâtiments »
+    partagent exactement la même géométrie.
+    """
     if osm_gdf is not None:
         from src.loaders.osm import match_osm_to_bdtopo
         gdf = match_osm_to_bdtopo(gdf, osm_gdf)
@@ -114,8 +129,102 @@ def load_buildings(
     gdf = filter_residential(gdf, bdnb_usage=bdnb_usage, min_floor_area=min_floor_area)
     logger.info("%d bâtiments résidentiels conservés", len(gdf))
 
-    gdf = estimate_nb_logts(gdf)
-    return gdf
+    return estimate_nb_logts(gdf)
+
+
+def absorb_slivers(
+    gdf: gpd.GeoDataFrame,
+    max_area: float = SLIVER_MAX_AREA,
+    snap_tol: float = SLIVER_SNAP_TOL,
+    size_ratio: float = SLIVER_SIZE_RATIO,
+    boundary_share: float = SLIVER_BOUNDARY_SHARE,
+) -> "tuple[gpd.GeoDataFrame, int]":
+    """Recolle les petits fragments (vitrines/avancées) à leur grand voisin jointif.
+
+    Un polygone est **absorbé** dans un voisin s'il vérifie tout :
+      1. surface de plancher (emprise × étages) < ``max_area`` ;
+      2. collé (< ``snap_tol``) à ce voisin ;
+      3. voisin = vrai bâtiment (≥ ``max_area``) ET ≥ ``size_ratio`` × le sliver ;
+      4. ≥ ``boundary_share`` du contour du sliver est partagé avec ce voisin.
+    Si plusieurs voisins éligibles, on retient celui partageant le plus de contour.
+    Géométrie de l'hôte = union ; ``NB_LOGTS`` sommé. Les bâtiments de taille
+    comparable (mitoyens) et les parties disjointes (gap) sont **laissés intacts**
+    → exits préservés. Cf. METHODE.md § 9.
+
+    Returns:
+        (GeoDataFrame nettoyé, nombre de fragments absorbés).
+    """
+    import shapely
+
+    if len(gdf) < 2:
+        return gdf.copy(), 0
+
+    g = gdf.reset_index(drop=True)
+    geom = g.geometry.values
+    floor = (g.geometry.area * _compute_nb_etages(g)).to_numpy()
+    sliver_pos = np.where(floor < max_area)[0]
+    if len(sliver_pos) == 0:
+        return g, 0
+
+    # Voisins candidats : bâtiments intersectant le sliver dilaté de snap_tol.
+    slv = gpd.GeoDataFrame(
+        {"_spos": sliver_pos},
+        geometry=g.geometry.iloc[sliver_pos].buffer(snap_tol).to_numpy(),
+        crs=g.crs,
+    )
+    cand = gpd.sjoin(slv, g[["geometry"]], predicate="intersects", how="inner")
+    cand = cand[cand["_spos"] != cand["index_right"]]
+    if cand.empty:
+        return g, 0
+
+    spos = cand["_spos"].to_numpy()
+    hpos = cand["index_right"].to_numpy()
+    # Hôte = vrai bâtiment, nettement plus grand.
+    ok = (floor[hpos] >= max_area) & (floor[hpos] >= size_ratio * floor[spos])
+    spos, hpos = spos[ok], hpos[ok]
+    if len(spos) == 0:
+        return g, 0
+
+    # Part du contour du sliver face à l'hôte (gère jointif et quasi-jointif).
+    slv_b = shapely.boundary(geom[spos])
+    shared = shapely.length(shapely.intersection(slv_b, shapely.buffer(geom[hpos], snap_tol)))
+    perim = shapely.length(slv_b)
+    share = np.divide(shared, perim, out=np.zeros_like(shared), where=perim > 0)
+    keep = share >= boundary_share
+    spos, hpos, share = spos[keep], hpos[keep], share[keep]
+    if len(spos) == 0:
+        return g, 0
+
+    # Meilleur hôte par sliver (contour partagé max).
+    best: dict[int, tuple[int, float]] = {}
+    for sp, hp, sh in zip(spos.tolist(), hpos.tolist(), share.tolist()):
+        if sp not in best or sh > best[sp][1]:
+            best[sp] = (hp, sh)
+
+    from collections import defaultdict
+    host_to_slivers: dict[int, list[int]] = defaultdict(list)
+    for sp, (hp, _) in best.items():
+        host_to_slivers[hp].append(sp)
+
+    geoms = list(geom)
+    has_nb = "NB_LOGTS" in g.columns
+    nb = g["NB_LOGTS"].to_numpy(dtype="float64").copy() if has_nb else None
+    to_drop: list[int] = []
+    for hp, sps in host_to_slivers.items():
+        geoms[hp] = shapely.union_all([geoms[hp]] + [geoms[sp] for sp in sps])
+        if has_nb:
+            nb[hp] += float(np.nan_to_num(nb[sps]).sum())
+        to_drop.extend(sps)
+
+    g["geometry"] = geoms
+    if has_nb:
+        g["NB_LOGTS"] = nb
+    out = g.drop(index=to_drop).reset_index(drop=True)
+    logger.info(
+        "Absorption slivers : %d fragments recollés (%d -> %d bâtiments)",
+        len(to_drop), len(g), len(out),
+    )
+    return out, len(to_drop)
 
 
 def _filter_by_study_area(

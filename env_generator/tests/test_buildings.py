@@ -599,3 +599,62 @@ class TestFilterResidentialSize:
         gdf = _make_buildings([self._bat("A", "Indifférencié", 3)])  # 9 m²
         result = filter_residential(gdf, bdnb_usage={"A": "residentiel"}, min_floor_area=25.0)
         assert set(result["ID"]) == {"A"}
+
+
+# ── absorb_slivers ────────────────────────────────────────────────────────────
+
+from src.loaders.buildings import absorb_slivers  # noqa: E402
+
+
+def _sq(x0, y0, x1, y1):
+    return Polygon([(x0, y0), (x1, y0), (x1, y1), (x0, y1)])
+
+
+def _bld(polys, nb_logts=None):
+    n = len(polys)
+    return gpd.GeoDataFrame(
+        {
+            "ID": [f"B{i}" for i in range(n)],
+            "NB_LOGTS": nb_logts if nb_logts is not None else [0] * n,
+            "NB_ETAGES": [1] * n,
+            "HAUTEUR": [3.0] * n,
+            "geometry": polys,
+        },
+        crs="EPSG:2154",
+    )
+
+
+class TestAbsorbSlivers:
+    def test_sliver_absorbed_into_large_neighbor(self):
+        g = _bld([_sq(0, 0, 10, 10), _sq(10, 0, 11, 10)])  # hôte 100 m², sliver 10 m²
+        out, n = absorb_slivers(g, boundary_share=0.3)
+        assert n == 1 and len(out) == 1
+        assert out.geometry.iloc[0].area == 110          # union hôte+sliver
+        assert out["ID"].iloc[0] == "B0"                 # l'hôte garde son ID
+
+    def test_equal_neighbors_not_merged(self):
+        # deux bâtiments comparables jointifs (mitoyens) → restent séparés
+        out, n = absorb_slivers(_bld([_sq(0, 0, 10, 10), _sq(10, 0, 20, 10)]))
+        assert n == 0 and len(out) == 2
+
+    def test_isolated_sliver_kept(self):
+        out, n = absorb_slivers(_bld([_sq(0, 0, 3, 3)]))  # 9 m², aucun voisin
+        assert n == 0 and len(out) == 1
+
+    def test_size_ratio_blocks(self):
+        # hôte 16 m² (≥ seuil) mais ratio 16/4 = 4 < 5 → pas d'absorption
+        g = _bld([_sq(0, 0, 4, 4), _sq(4, 0, 6, 2)])
+        out, n = absorb_slivers(g, boundary_share=0.2)
+        assert n == 0 and len(out) == 2
+
+    def test_boundary_share_blocks(self):
+        # sliver ne touchant l'hôte qu'au coin → part de contour ~0 < 0.5
+        g = _bld([_sq(0, 0, 10, 10), _sq(10, 10, 12, 12)])
+        out, n = absorb_slivers(g)
+        assert n == 0 and len(out) == 2
+
+    def test_nb_logts_summed(self):
+        g = _bld([_sq(0, 0, 10, 10), _sq(10, 0, 11, 10)], nb_logts=[5, 1])
+        out, n = absorb_slivers(g, boundary_share=0.3)
+        assert n == 1
+        assert out["NB_LOGTS"].iloc[0] == 6
