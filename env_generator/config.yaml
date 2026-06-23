@@ -59,6 +59,10 @@ buildings:
   # Recolle les petits fragments (vitrines/avancees) a leur grand voisin jointif
   # (de-fragmentation conservatrice, preserve les exits). Voir METHODE.md s9.
   absorb_slivers: true
+  # Surface de plancher max d'un fragment candidat a l'absorption (m2). Au-dela =
+  # vrai batiment. Les portes size_ratio (>=5x) et boundary_share (>=50% du contour)
+  # protegent les mitoyens meme a ce seuil. 20 capte les vitrines de 15-20 m2.
+  sliver_max_area_m2: 20
 
 # -- Lieux de travail (modele gravitaire) -----------------------------------
 # Un actif occupe (CSP en emploi) par batiment residentiel recoit un batiment

@@ -658,3 +658,14 @@ class TestAbsorbSlivers:
         out, n = absorb_slivers(g, boundary_share=0.3)
         assert n == 1
         assert out["NB_LOGTS"].iloc[0] == 6
+
+    def test_sandwich_between_two_hosts_absorbed(self):
+        # Fragment enchâssé entre deux gros voisins : il partage ~36 % de son
+        # contour avec chacun (aucun seul n'atteint boundary_share=0.5), mais 71 %
+        # au total → doit être absorbé (cf. METHODE.md § 9).
+        sliver = _sq(10, 0, 12, 5)            # 10 m², périmètre 14 m
+        left = _sq(0, 0, 10, 10)             # 100 m², collé sur 5 m (≈0.36)
+        right = _sq(12, 0, 22, 10)           # 100 m², collé sur 5 m (≈0.36)
+        out, n = absorb_slivers(_bld([sliver, left, right]))   # boundary_share=0.5 par défaut
+        assert n == 1 and len(out) == 2
+        assert out.geometry.area.sum() == 210   # surface conservée (10+100+100)

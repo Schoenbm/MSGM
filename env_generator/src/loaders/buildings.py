@@ -145,7 +145,9 @@ def absorb_slivers(
       1. surface de plancher (emprise × étages) < ``max_area`` ;
       2. collé (< ``snap_tol``) à ce voisin ;
       3. voisin = vrai bâtiment (≥ ``max_area``) ET ≥ ``size_ratio`` × le sliver ;
-      4. ≥ ``boundary_share`` du contour du sliver est partagé avec ce voisin.
+      4. la part **totale** du contour du sliver adossée à ces voisins ≥
+         ``boundary_share`` (un fragment partagé 30 %+30 % entre deux gros voisins
+         est donc recollé, pas seulement ceux collés à ≥ 50 % d'un seul).
     Si plusieurs voisins éligibles, on retient celui partageant le plus de contour.
     Géométrie de l'hôte = union ; ``NB_LOGTS`` sommé. Les bâtiments de taille
     comparable (mitoyens) et les parties disjointes (gap) sont **laissés intacts**
@@ -185,21 +187,26 @@ def absorb_slivers(
     if len(spos) == 0:
         return g, 0
 
-    # Part du contour du sliver face à l'hôte (gère jointif et quasi-jointif).
+    # Part du contour du sliver face à chaque hôte candidat (jointif/quasi-jointif).
     slv_b = shapely.boundary(geom[spos])
     shared = shapely.length(shapely.intersection(slv_b, shapely.buffer(geom[hpos], snap_tol)))
     perim = shapely.length(slv_b)
     share = np.divide(shared, perim, out=np.zeros_like(shared), where=perim > 0)
-    keep = share >= boundary_share
-    spos, hpos, share = spos[keep], hpos[keep], share[keep]
-    if len(spos) == 0:
-        return g, 0
 
-    # Meilleur hôte par sliver (contour partagé max).
-    best: dict[int, tuple[int, float]] = {}
+    # Par sliver : hôte au contour partagé max + part TOTALE de contour adossée à du
+    # bâti-hôte. On absorbe dès que la part totale ≥ boundary_share — ce qui capte
+    # aussi un fragment enchâssé ENTRE deux gros voisins (p. ex. 30 % + 30 %),
+    # qu'aucun hôte seul ne suffirait à capter (cf. METHODE.md § 9, « sliver entre
+    # deux grands voisins »). Absorption dans l'hôte au contour partagé maximal.
+    best: dict[int, tuple[int, float]] = {}     # sp -> (hôte au contour max, part)
+    total_share: dict[int, float] = {}
     for sp, hp, sh in zip(spos.tolist(), hpos.tolist(), share.tolist()):
+        total_share[sp] = total_share.get(sp, 0.0) + sh
         if sp not in best or sh > best[sp][1]:
             best[sp] = (hp, sh)
+    best = {sp: hpsh for sp, hpsh in best.items() if total_share[sp] >= boundary_share}
+    if not best:
+        return g, 0
 
     from collections import defaultdict
     host_to_slivers: dict[int, list[int]] = defaultdict(list)

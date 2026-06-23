@@ -198,8 +198,8 @@ def generate_agents(
         agents[col] = np.nan
 
     workplaces = identify_workplaces(all_buildings, usages, extra_ids=workplace_extra_ids)
-    # Faute de niveau fiable dans OSM, collège/lycée retombent sur le pool "école"
-    # générique quand aucun établissement n'est explicitement nommé/typé.
+    # Collège/lycée retombent sur le pool "école" si leur sous-ensemble BPE est
+    # vide (sécurité ; en pratique BPE distingue les niveaux par TYPEQU).
     plans = [
         (ACT_TRAVAIL, workplaces, "ID", "lieu de travail", decay_m),
         (ACT_CRECHE, _education_subset(education, ACT_CRECHE, crs), "equip_id", "crèche", education_decay_m),
@@ -242,12 +242,14 @@ def _education_subset(
     education: "gpd.GeoDataFrame | None", kind: str, crs,
     fallback: "str | None" = None,
 ) -> "gpd.GeoDataFrame | None":
-    """Filtre les équipements éducatifs par type et leur ajoute une capacité unité.
+    """Filtre les équipements éducatifs par type et garantit une colonne capacity.
 
-    Faute de donnée de capacité OSM, chaque équipement pèse 1 : l'affectation est
-    alors dominée par la proximité (les enfants vont au plus proche, à l'aléa près).
-    Si le type demandé est vide et qu'un `fallback` est fourni (ex. collège/lycée
-    non distingués dans OSM → pool "école" générique), on bascule dessus.
+    La capacité d'accueil BPE n'est pas renseignée pour l'enseignement (vérifié :
+    0/1463 équipements en Isère) : `bpe.py` retombe sur 1.0, chaque équipement pèse
+    1 → l'affectation est dominée par la proximité (les enfants vont au plus proche,
+    à l'aléa près). Le repli `capacity=1.0` ci-dessous ne sert qu'à une entrée hors
+    BPE (sans colonne capacity). Si le type demandé est vide et qu'un `fallback` est
+    fourni (collège/lycée → pool "école"), on bascule dessus.
     """
     if education is None or education.empty or "kind" not in education.columns:
         return None
@@ -259,7 +261,7 @@ def _education_subset(
     if sub.crs is not None and crs is not None and sub.crs != crs:
         sub = sub.to_crs(crs)
     if "capacity" not in sub.columns:
-        sub["capacity"] = 1.0  # capacité inconnue → proximité dominante
+        sub["capacity"] = 1.0  # entrée hors BPE sans capacité → proximité dominante
     return sub
 
 

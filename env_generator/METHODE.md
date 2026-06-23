@@ -169,7 +169,8 @@ Inspiré du localisateur `spll`/`GravityFunction` de Genstar.
 | `network.types` | walk, drive | config.yaml | réseaux routiers générés |
 | `buildings.min_dwelling_floor_area_m2` | 25 | config.yaml | porte de plausibilité d'habitation |
 | `buildings.absorb_slivers` | true | config.yaml | recolle les fragments (vitrines) aux gros voisins |
-| `SLIVER_MAX_AREA` / `_SNAP_TOL` / `_SIZE_RATIO` / `_BOUNDARY_SHARE` | 15 m² / 0,3 m / 5 / 0,5 | buildings.py | critères d'absorption d'un sliver |
+| `buildings.sliver_max_area_m2` | **20** | config.yaml | taille max d'un fragment absorbable (constante lib `SLIVER_MAX_AREA` = 15) |
+| `_SNAP_TOL` / `_SIZE_RATIO` / `_BOUNDARY_SHARE` | 0,3 m / 5 / 0,5 | buildings.py | collé / hôte ≥ 5× / part de contour (totale) mini |
 | `workplaces.usages` | Commercial/Industriel/Agricole/Religieux/Sportif | config.yaml | usages BD TOPO = lieux de travail |
 | `workplaces.decay_m` | 3000 | config.yaml | décroissance distance domicile-travail |
 | `workplaces.seed` | 42 | config.yaml | reproductibilité des tirages |
@@ -241,13 +242,17 @@ Inspiré du localisateur `spll`/`GravityFunction` de Genstar.
 ## 9. Absorption de slivers (implémenté)
 
 > **Statut : implémenté** (`loaders/buildings.py::absorb_slivers`, branché dans
-> `step_env`, toggle `buildings.absorb_slivers` config, défaut `true`). Tests :
-> `tests/test_buildings.py::TestAbsorbSlivers`.
+> `step_env`, toggles `buildings.absorb_slivers` (défaut `true`) et
+> `buildings.sliver_max_area_m2` (défaut **20 m²**, cf. § 4). Gère le cas
+> **sandwich** (fragment partagé entre 2+ gros voisins : critère 4 sur le contour
+> **total**). Tests : `tests/test_buildings.py::TestAbsorbSlivers`.
 >
-> **Résultat mesuré (région, `boundary_share=0.5`)** : **5 688 fragments recollés**
-> → 74 598 bâtiments, **surface bâtie conservée à 100,000 %** (que des unions de
-> jointifs, aucune géométrie inventée ni perdue → exits préservés). Sensibilité :
-> `0.4` → 7 109 ; `0.3` → 8 566.
+> **Mesuré sur le bâti complet (métropole, 80 295 bât., `boundary_share=0.5`)** :
+> à `max_area=20` → **7 387 fragments recollés** (72 908 bâtiments) ;
+> à `max_area=15` → **6 076** (dont **+391** sandwiches gagnés par le critère
+> total). **Surface bâtie conservée à 100,0000 %** dans les deux cas (unions de
+> jointifs uniquement, aucune géométrie inventée ni perdue → exits préservés).
+> *(Ancien chiffre, région à 15 m² sans sandwich : 5 688.)*
 
 ### Problème
 La BD TOPO sur-segmente : (a) petits polygones-bruit (abris, < ~15 m²) ; (b)
@@ -268,8 +273,10 @@ Un polygone est un **sliver** absorbable s'il vérifie **tout** :
 2. **collé** à un voisin : distance < `SNAP_TOL` (~0,3 m) — jointif ou quasi ;
 3. **voisin nettement plus grand** : aire voisin ≥ `SIZE_RATIO` × aire sliver
    (~5×) — garantit qu'on ne fusionne pas deux bâtiments comparables (mitoyens) ;
-4. (option) le sliver partage une **part importante de son propre contour** avec ce
-   voisin (`BOUNDARY_SHARE`, ~50 %) — c'est une avancée du bâtiment, pas un voisin.
+4. la **part totale** du contour du sliver adossée à ces voisins ≥ `BOUNDARY_SHARE`
+   (~50 %) — une avancée du bâtiment, pas un voisin. Le seuil porte sur le contour
+   **cumulé** : un fragment enchâssé entre **deux** gros voisins (30 % + 30 %) est
+   recollé, dans celui au contour partagé maximal (cas « sandwich »).
 
 Action : **union** du sliver dans le voisin retenu (si plusieurs candidats, celui
 qui partage le plus de contour). Sliver **isolé** (aucun grand voisin) : ne pas

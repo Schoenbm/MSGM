@@ -42,6 +42,7 @@ class Config:
     buildings_source: str
     buildings_min_floor_area: float
     buildings_absorb_slivers: bool
+    buildings_sliver_max_area: float
     output_dir: Path
     output_format: str
     raw: dict
@@ -114,6 +115,9 @@ def load_config(path: "str | Path") -> Config:
         ),
         buildings_absorb_slivers=bool(
             (data.get("buildings") or {}).get("absorb_slivers", True)
+        ),
+        buildings_sliver_max_area=float(
+            (data.get("buildings") or {}).get("sliver_max_area_m2", 20.0)
         ),
         output_dir=output_dir,
         output_format=output.get("format", "gpkg"),

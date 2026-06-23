@@ -15,10 +15,10 @@ Ce module ne génère PAS la population : il reçoit des agents actifs déjà cr
 (cf. matching/agents.py) et leur attribue à chacun un lieu de travail.
 
 ASSOMPTIONS À REVOIR (premier jet, "on redesignera si besoin") :
-- Lieux de travail = bâtiments BD TOPO dont USAGE1/USAGE2 ∈ `usages` d'emploi.
-  Les "Indifférencié" (bureaux / public souvent, mais aussi annexes inconnues)
-  sont EXCLUS par défaut : ~35k bâtiments trop bruités sans tag OSM. À raffiner
-  avec d'autres sources (à venir).
+- Lieux de travail = bâtiments BD TOPO dont USAGE1/USAGE2 ∈ `usages` d'emploi,
+  COMPLÉTÉS par les "Indifférencié" que la BDNB qualifie d'emploi (via `extra_ids`,
+  ~+4 500 sur la métropole ; cf. `identify_workplaces` et `loaders/bdnb.py`). Les
+  Indifférencié sans signal BDNB restent exclus (bruités, sans tag).
 - Capacité = surface de plancher seule (pas de densité d'emploi par type d'usage).
 - Tout actif occupé travaille DANS la région chargée : pas de fuite hors zone,
   pas de télétravail, pas de calage sur les flux domicile-travail INSEE (MOBPRO).

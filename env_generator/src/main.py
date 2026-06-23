@@ -386,7 +386,7 @@ def step_env(verbose: bool = False, config_path: str = "config.yaml", assume_yes
     # dérive résidentiels et tous-bâtiments de la MÊME géométrie nettoyée.
     buildings_all = load_all_buildings(buildings_shp, study_area=region_gdf)
     if cfg.buildings_absorb_slivers:
-        buildings_all, _ = absorb_slivers(buildings_all)
+        buildings_all, _ = absorb_slivers(buildings_all, max_area=cfg.buildings_sliver_max_area)
     buildings_all["usage_bdnb"] = buildings_all["ID"].map(bdnb_usage)  # annotation (QGIS/GAMA)
     buildings = prepare_residential(buildings_all, osm_gdf=osm_gdf,
                                     bdnb_usage=bdnb_usage,

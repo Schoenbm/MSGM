@@ -53,7 +53,7 @@ env_generator/
 │   │   ├── compare.py / compare_grid.py  # validation vs recensement
 │   │   └── casualties.py        # victimes/sans-abris depuis dommages D1..D5
 │   └── utils/logging_config.py
-└── tests/                       # pytest (~307 tests)
+└── tests/                       # pytest (~305 tests)
 ```
 
 > ⚠️ `loaders/osm.py` concerne les **bâtiments** (tags flats/levels), PAS le
@@ -95,7 +95,8 @@ ligne = un individu, avec domicile, âge, CSP, une **activité** et une destinat
 `assign_facilities` (inspiré du localisateur `spll`/`GravityFunction` de Genstar) :
 affecte par activité une destination tirée par `P(j|i) ∝ capacité_j × exp(-dist_ij
 / decay_m)`, réutilisé pour travail / école / crèche :
-- **travail** : bâtiments `buildings_all` dont `USAGE1`/`USAGE2` ∈
+- **travail** : bâtiments de la couche région (frame interne `all_buildings`,
+  pas un fichier de sortie : l'export est la couche unique `buildings`) dont `USAGE1`/`USAGE2` ∈
   `workplaces.usages` (défaut Commercial et services, Industriel, Agricole,
   Religieux, Sportif), **+ récupération BDNB** : les bâtiments dont
   `usage_principal_bdnb_open` ∈ {Tertiaire, Secondaire, Primaire} (passés via
@@ -127,12 +128,14 @@ dits résidentiels ; (2) `identify_workplaces` ajoute les bâtiments `travail`.
 `filter_residential` applique en plus une **porte de plausibilité par la taille**
 (`min_floor_area`, déf. 25 m²) qui écarte les abris/garages « Indifférencié » sans
 signal — générique, indépendante de la BDNB (cf. section « Indifférencié » plus bas).
-En amont, `absorb_slivers` (toggle `buildings.absorb_slivers`) **recolle les petits
-fragments** (vitrines/avancées) à leur grand voisin jointif — dé-fragmentation
-conservatrice, surface conservée, exits préservés (cf. METHODE.md § 9).
+En amont, `absorb_slivers` (toggles `buildings.absorb_slivers` +
+`buildings.sliver_max_area_m2`, déf. 20 m²) **recolle les petits fragments**
+(vitrines/avancées, **y compris** ceux enchâssés entre deux gros voisins — cas
+sandwich) à leur grand voisin jointif — dé-fragmentation conservatrice, surface
+conservée à 100 %, exits préservés (cf. METHODE.md § 9).
 La couche bâtiment exportée porte une colonne `usage_bdnb` (inspection QGIS/GAMA).
-Sur la métropole : ~+4 500 lieux de travail récupérés, ~4 000 faux logements
-écartés. NB : OSM ne couvre ici que les bâtiments tagués flats/levels (apport
+Sur la région : ~+4 500 lieux de travail récupérés, ~17 800 faux logements
+écartés (chiffre aligné sur METHODE.md § 3.4). NB : OSM ne couvre ici que les bâtiments tagués flats/levels (apport
 faible sur les Indifférencié) ; la BDNB fait l'essentiel.
 
 **Équipements éducatifs (`loaders/bpe.py`).** Source autoritaire (BPE 2024, INSEE) :
