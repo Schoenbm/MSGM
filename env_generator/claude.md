@@ -284,6 +284,11 @@ et/ou la matrice de flux commune→commune des agents à MOBPRO (étalon).
 
 ## Chantier — bâtiments stratégiques (équipements / POI évacuation)
 
+> Concrètement, ce chantier **remplit le flag `is_strategic`** du contrat `env`
+> (laissé de côté à la création du contrat). Idem `is_education` = matching
+> BPE→footprint. Cf. METHODE.md § 8.
+
+
 **Constat (vérifié).** Les grands bâtiments-clés de l'évacuation **ne sont PAS
 filtrés** — ils sont dans la couche `buildings`. Mais la BD TOPO *bâti* est **sans
 nom** : ils sortent en `Indifférencié` anonymes. Exemples mesurés : Hôtel de Ville
