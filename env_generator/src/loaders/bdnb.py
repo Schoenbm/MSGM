@@ -94,3 +94,50 @@ def load_bdnb_building_usage(gpkg_path: "str | Path") -> "dict[str, str]":
 def employment_ids(usage: "dict[str, str]") -> "set[str]":
     """ID bâtiments d'emploi (catégorie ``travail``) depuis la carte d'usage."""
     return {bid for bid, cat in usage.items() if cat == "travail"}
+
+
+# Attributs de vulnérabilité (fichiers fonciers BDNB) consommés par le module de
+# crise (réseau de neurones D1-D5). Meilleure couverture et libellés lisibles que
+# MAT_MURS/MAT_TOITS BD TOPO (codes à 2 chiffres). Couverture mesurée sur la
+# métropole : année ~58 %, matériaux ~64 % (dont ~23 % « INDETERMINE »). Les trous
+# restants relèvent du prétraitement aval (imputation), pas de l'export.
+_ATTR_COLS: dict[str, str] = {
+    "ffo_bat_annee_construction": "annee_construction",
+    "ffo_bat_mat_mur_txt": "mat_mur",
+    "ffo_bat_mat_toit_txt": "mat_toit",
+}
+
+
+def load_bdnb_building_attrs(gpkg_path: "str | Path") -> pd.DataFrame:
+    """Renvoie un DataFrame `ID → {annee_construction, mat_mur, mat_toit}` (BDNB ffo).
+
+    Mêmes couches que `load_bdnb_building_usage` (`compile` + `rel` BD TOPO),
+    d'autres colonnes. Source optionnelle : DataFrame vide (colonnes nommées) si le
+    gpkg est absent. Les attributs d'un groupe sont propagés à chaque bâtiment
+    BD TOPO du groupe.
+    """
+    cols = ["ID", *_ATTR_COLS.values()]
+    if gpkg_path is None or not Path(gpkg_path).exists():
+        logger.warning("BDNB absente (%s) — pas d'attributs matériaux/période", gpkg_path)
+        return pd.DataFrame(columns=cols)
+    gpkg_path = Path(gpkg_path)
+
+    comp = gpd.read_file(
+        gpkg_path, layer=_LAYER_COMPILE,
+        columns=["batiment_groupe_id", *_ATTR_COLS], ignore_geometry=True,
+    ).rename(columns=_ATTR_COLS)
+    rel = gpd.read_file(
+        gpkg_path, layer=_LAYER_REL_BDTOPO,
+        columns=["bdtopo_bat_cleabs", "batiment_groupe_id"], ignore_geometry=True,
+    )
+
+    merged = rel.merge(comp, on="batiment_groupe_id", how="left")
+    out = (
+        merged.rename(columns={"bdtopo_bat_cleabs": "ID"})[cols]
+        .dropna(subset=list(_ATTR_COLS.values()), how="all")
+        .drop_duplicates(subset="ID")
+        .reset_index(drop=True)
+    )
+    cov = {c: f"{100 * out[c].notna().mean():.0f}%" for c in _ATTR_COLS.values()}
+    logger.info("BDNB attributs : %d bâtiments annotés, couverture %s", len(out), cov)
+    return out

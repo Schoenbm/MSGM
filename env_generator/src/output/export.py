@@ -4,10 +4,10 @@ from pathlib import Path
 import geopandas as gpd
 import pandas as pd
 
-logger = logging.getLogger(__name__)
+from src.loaders.buildings import _compute_nb_etages
+from src.matching.workplaces import DEFAULT_WORKPLACE_USAGES
 
-# Columns kept in the lightweight export
-_LIGHT_COLS = ["ID", "geometry", "residentiel", "population_allouee"]
+logger = logging.getLogger(__name__)
 
 # Columns dropped from the export (internal pipeline artifacts)
 _DROP_COLS = ["cell_idx"]
@@ -17,6 +17,9 @@ _DROP_COLS = ["cell_idx"]
 _SHP_RENAME: dict[str, str] = {
     "population_allouee": "pop_allou",
     "menages_alloues": "men_allou",
+    "annee_construction": "annee_con",
+    "is_residential": "is_resid",
+    "is_workplace": "is_workpl",
 }
 
 
@@ -63,13 +66,14 @@ def merge_buildings(
 
 
 def export_buildings(buildings: gpd.GeoDataFrame, output_dir: str | Path) -> None:
-    """Exporte la couche bâtiment fusionnée (GeoJSON + CSV + Shapefile).
+    """Exporte la couche bâtiment complète (GeoJSON + CSV + Shapefile).
 
-    Produit dans output_dir :
-    - buildings.{geojson,csv,shp}        : tous les bâtiments, toutes colonnes
-      (population_allouee = 0 si non-logement, flag `residentiel`, `usage_bdnb`…)
-    - buildings_light.{geojson,csv,shp}  : ID + géométrie + residentiel +
-      population_allouee (+ CSP) — vue allégée.
+    Superset d'inspection (QGIS) et source de population pour `casualties.py` :
+    tous les bâtiments, toutes colonnes (population_allouee = 0 si non-logement,
+    flag `residentiel`, `usage_bdnb`, CSP/âge, matériaux/période BDNB…).
+
+    Le **contrat de simulation** (curaté, sans population) est produit séparément
+    par `export_env`.
 
     Args:
         buildings:  GeoDataFrame issu de merge_buildings.
@@ -84,16 +88,65 @@ def export_buildings(buildings: gpd.GeoDataFrame, output_dir: str | Path) -> Non
     _write_csv(full.drop(columns=["geometry"]), output_dir / "buildings.csv")
     _write_shp(full, output_dir / "buildings.shp")
 
-    csp_cols = [c for c in buildings.columns if c.startswith("csp_")]
-    light_cols = [c for c in _LIGHT_COLS if c in buildings.columns] + csp_cols
-    light = buildings[light_cols].copy()
-    _write_geojson(light, output_dir / "buildings_light.geojson")
-    _write_csv(light.drop(columns=["geometry"]), output_dir / "buildings_light.csv")
-    _write_shp(light, output_dir / "buildings_light.shp")
-
     logger.info(
         "Export bâtiments dans %s  (%d bâtiments, %d colonnes ; dont %d logements)",
         output_dir, len(full), len(full.columns), int(buildings["residentiel"].sum()),
+    )
+
+
+def build_env_layer(
+    buildings: gpd.GeoDataFrame,
+    workplace_usages: "tuple[str, ...] | list[str]" = DEFAULT_WORKPLACE_USAGES,
+) -> gpd.GeoDataFrame:
+    """Compose le **contrat d'environnement** : faits physiques du bâtiment, sans
+    population ni dépendance à la crise.
+
+    Colonnes : ID, geometry, flags de rôle (`is_residential`, `is_workplace`),
+    profil vertical (`n_etages`, `hauteur`, `emprise_m2`, `z_min_sol`, `z_max_toit`
+    → capacité de refuge calculée en aval selon la cote d'inondation), vulnérabilité
+    (`mat_mur`, `mat_toit`, `annee_construction` — BDNB ffo, consommés par le NN
+    D1-D5). Rôles `is_education`/`is_strategic` différés (chantiers BPE/POI).
+    """
+    b = buildings
+    idx = b.index
+    usage_usages = tuple(workplace_usages)
+    u1 = b.get("USAGE1", pd.Series(index=idx, dtype="object"))
+    u2 = b.get("USAGE2", pd.Series(index=idx, dtype="object"))
+    usage_bdnb = b.get("usage_bdnb", pd.Series(index=idx, dtype="object"))
+
+    env = gpd.GeoDataFrame({"ID": b["ID"].values}, geometry=b.geometry.values, crs=b.crs)
+    env["is_residential"] = (
+        b["residentiel"].astype(bool).values if "residentiel" in b.columns else False
+    )
+    env["is_workplace"] = (
+        u1.isin(usage_usages) | u2.isin(usage_usages) | (usage_bdnb == "travail")
+    ).values
+    env["n_etages"] = _compute_nb_etages(b).round().astype(int).values
+    env["hauteur"] = b.get("HAUTEUR", pd.Series(index=idx, dtype="float64")).values
+    env["emprise_m2"] = b.geometry.area.round(1).values
+    env["z_min_sol"] = b.get("Z_MIN_SOL", pd.Series(index=idx, dtype="float64")).values
+    env["z_max_toit"] = b.get("Z_MAX_TOIT", pd.Series(index=idx, dtype="float64")).values
+    for col in ("mat_mur", "mat_toit", "annee_construction"):
+        env[col] = b.get(col, pd.Series(index=idx, dtype="object")).values
+    return env
+
+
+def export_env(
+    buildings: gpd.GeoDataFrame,
+    output_dir: str | Path,
+    workplace_usages: "tuple[str, ...] | list[str]" = DEFAULT_WORKPLACE_USAGES,
+) -> None:
+    """Exporte le contrat d'environnement `env.{geojson,csv,shp}` (cf. build_env_layer)."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    env = _sanitize_for_export(build_env_layer(buildings, workplace_usages))
+    _write_geojson(env, output_dir / "env.geojson")
+    _write_csv(env.drop(columns=["geometry"]), output_dir / "env.csv")
+    _write_shp(env, output_dir / "env.shp")
+    logger.info(
+        "Export env (contrat simu) : %d bâtiments  |  %d travail, %d résidentiel",
+        len(env), int(env["is_workplace"].sum()), int(env["is_residential"].sum()),
     )
 
 

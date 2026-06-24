@@ -4,7 +4,7 @@ import geopandas as gpd
 import pandas as pd
 from shapely.geometry import Polygon
 
-from src.output.export import merge_buildings, export_buildings
+from src.output.export import merge_buildings, export_buildings, export_env, build_env_layer
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -80,22 +80,25 @@ class TestMergeBuildings:
 
 class TestExportBuildings:
     def _export(self, tmp_path):
-        export_buildings(merge_buildings(_make_all_buildings(), _make_result()), tmp_path)
+        merged = merge_buildings(_make_all_buildings(), _make_result())
+        export_buildings(merged, tmp_path)
+        export_env(merged, tmp_path)
 
     def test_creates_buildings_files(self, tmp_path):
         self._export(tmp_path)
         for ext in ("geojson", "csv", "shp"):
             assert (tmp_path / f"buildings.{ext}").exists()
 
-    def test_creates_light_files(self, tmp_path):
+    def test_creates_env_files(self, tmp_path):
         self._export(tmp_path)
         for ext in ("geojson", "csv", "shp"):
-            assert (tmp_path / f"buildings_light.{ext}").exists()
+            assert (tmp_path / f"env.{ext}").exists()
 
     def test_no_legacy_filenames(self, tmp_path):
         self._export(tmp_path)
         assert not (tmp_path / "buildings_full.geojson").exists()
         assert not (tmp_path / "buildings_all.geojson").exists()
+        assert not (tmp_path / "buildings_light.geojson").exists()  # remplacé par env
 
     def test_buildings_csv_has_all_rows(self, tmp_path):
         self._export(tmp_path)
@@ -103,19 +106,44 @@ class TestExportBuildings:
         assert len(df) == 3
         assert "geometry" not in df.columns
 
-    def test_light_csv_is_minimal(self, tmp_path):
+    def test_env_csv_is_the_contract(self, tmp_path):
         self._export(tmp_path)
-        df = pd.read_csv(tmp_path / "buildings_light.csv")
-        assert {"ID", "residentiel", "population_allouee"}.issubset(df.columns)
-        assert "USAGE1" not in df.columns
+        df = pd.read_csv(tmp_path / "env.csv")
+        # Contient les faits physiques…
+        assert {"ID", "is_residential", "is_workplace", "n_etages", "emprise_m2",
+                "z_min_sol", "z_max_toit", "mat_mur", "annee_construction"}.issubset(df.columns)
+        # …et PAS la population ni les attributs INSEE.
+        for forbidden in ("population_allouee", "USAGE1", "csp_cadres", "age_25_39"):
+            assert forbidden not in df.columns
 
     def test_shp_column_names_max_10_chars(self, tmp_path):
         self._export(tmp_path)
-        gdf = gpd.read_file(tmp_path / "buildings.shp")
-        for col in gdf.columns:
-            assert len(col) <= 10, f"Colonne trop longue : '{col}'"
+        for layer in ("buildings", "env"):
+            gdf = gpd.read_file(tmp_path / f"{layer}.shp")
+            for col in gdf.columns:
+                assert len(col) <= 10, f"Colonne trop longue : '{col}'"
 
     def test_creates_output_dir_if_missing(self, tmp_path):
         out = tmp_path / "new_subdir"
         export_buildings(merge_buildings(_make_all_buildings(), _make_result()), out)
         assert out.exists()
+
+
+class TestBuildEnvLayer:
+    def test_role_flags(self):
+        env = build_env_layer(merge_buildings(_make_all_buildings(), _make_result()))
+        role = env.set_index("ID")
+        assert bool(role.loc["BAT1", "is_residential"]) is True
+        assert bool(role.loc["BAT1", "is_workplace"]) is False
+        assert bool(role.loc["BAT2", "is_workplace"]) is True   # usage_bdnb == travail
+        assert bool(role.loc["BAT3", "is_residential"]) is False
+
+    def test_vertical_profile_present(self):
+        env = build_env_layer(merge_buildings(_make_all_buildings(), _make_result()))
+        assert (env["n_etages"] >= 1).all()
+        assert (env["emprise_m2"] > 0).all()
+
+    def test_no_population_leak(self):
+        env = build_env_layer(merge_buildings(_make_all_buildings(), _make_result()))
+        assert "population_allouee" not in env.columns
+        assert not any(c.startswith(("csp_", "age_")) for c in env.columns)

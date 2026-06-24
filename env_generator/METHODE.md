@@ -56,7 +56,7 @@ Pipeline `python -m src.main --step env` (piloté par `config.yaml`), tout en
 | OSM bâtiments (Overpass) | live | `loaders/osm.py` | Enrichissement flats/levels + tag usage | Active — secondaire |
 | OSM réseau routier (osmnx) | live | `loaders/roads.py` | Réseau piéton + voiture | Active |
 | **BPE** (INSEE) | 2024 | `loaders/bpe.py` | Équipements éducatifs géolocalisés (crèche/école/collège/lycée) | Active |
-| **BDNB** (CSTB) | local ~2,5 Go | `loaders/bdnb.py` | Usage bâtiment (qualifie les Indifférencié) | Active (optionnelle) |
+| **BDNB** (CSTB) | local ~2,5 Go | `loaders/bdnb.py` | Usage (qualifie les Indifférencié) **+ matériaux/période** (`ffo_bat_*`) pour la vulnérabilité (NN D1-D5) | Active (optionnelle) |
 | MOBPRO (INSEE) | 2022 | `loaders/mobpro.py` | Flux domicile-travail commune→commune | **Réservée** (non branchée) |
 
 Toutes les sources distantes passent par le **cache unique** (`loaders/cache.py`,
@@ -150,14 +150,26 @@ Inspiré du localisateur `spll`/`GravityFunction` de Genstar.
   Collège/lycée retombent sur le pool « école » si vide.
 
 ### 3.9 Sorties (`output/export.py`)
-- **`buildings.{geojson,csv,shp}`** — couche **unique** : tous les bâtiments de la
-  région, toutes colonnes, `population_allouee` (0 si non-logement), flag
-  `residentiel`, `usage_bdnb`, CSP/âge. (`merge_buildings` fusionne l'ancien couple
+Architecture en 3 modules : **env_generator** (ce module, **indépendant de la
+crise**) → **crisis_gen** (NN D1-D5, inondation, capacité de refuge selon la cote)
+→ **simulation**. D'où la séparation faits physiques / population / crise.
+- **`buildings.{geojson,csv,shp}`** — couche **complète** (superset d'inspection
+  QGIS + source pop actuelle de `casualties.py`) : tous les bâtiments, toutes
+  colonnes, `population_allouee` (0 si non-logement), `residentiel`, `usage_bdnb`,
+  CSP/âge, matériaux/période BDNB. (`merge_buildings` fusionne l'ancien couple
   `buildings_full`/`buildings_all`.)
-- **`buildings_light.{...}`** — ID + géom + `residentiel` + population + CSP.
+- **`env.{geojson,csv,shp}`** — **contrat de simulation** (curaté, *sans* population,
+  indépendant de la crise ; remplace `buildings_light`) : `ID`, géométrie, flags de
+  rôle (`is_residential`, `is_workplace` ; éducation/stratégique différés), **profil
+  vertical** (`n_etages`, `hauteur`, `emprise_m2`, `z_min_sol`, `z_max_toit` → la
+  capacité de refuge est calculée **en aval** selon la cote d'inondation, donc côté
+  crisis_gen), **vulnérabilité** (`mat_mur`, `mat_toit`, `annee_construction` — BDNB
+  ffo, pour le NN D1-D5). Consommé par les modules crise ET simulation.
 - **`agents.{gpkg,geojson,csv}`** — 1 ligne = 1 individu : `agent_id`, `home_id`,
   `age`, `age_band`, `csp`, `activity`, `is_worker`, `dest_id`, `dest_x/y`, `dist_m`,
-  géométrie = point domicile.
+  géométrie = point domicile. **Source unique de la population** : le contrat `env`
+  ne porte plus le détail (population/bâtiment = `groupby(home_id)`). Le *nombre*
+  par bâtiment est déterministe (le seed change qui sont les agents, pas combien).
 
 ---
 

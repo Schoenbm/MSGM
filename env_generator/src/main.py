@@ -155,7 +155,7 @@ def step_export(verbose: bool = False, source: str = "filosofi") -> None:
     log = logging.getLogger(__name__)
 
     import geopandas as gpd
-    from src.output.export import merge_buildings, export_buildings
+    from src.output.export import merge_buildings, export_buildings, export_env
 
     log.info("=== STEP export (source=%s) ===", source)
     _, result_gpkg = _source_paths(source)
@@ -170,7 +170,9 @@ def step_export(verbose: bool = False, source: str = "filosofi") -> None:
         log.warning("buildings_all.gpkg absent — couche bâtiment limitée aux résidentiels "
                     "(relancer --step load pour inclure tous les bâtiments)")
         buildings_all = result
-    export_buildings(merge_buildings(buildings_all, result), out_dir)
+    merged = merge_buildings(buildings_all, result)
+    export_buildings(merged, out_dir)
+    export_env(merged, out_dir)
 
 
 def step_visualize(verbose: bool = False, source: str = "filosofi") -> None:
@@ -302,12 +304,12 @@ def step_env(verbose: bool = False, config_path: str = "config.yaml", assume_yes
     from src.loaders.roads import fetch_road_network
     from src.loaders.osm import fetch_osm_buildings
     from src.loaders.bpe import load_bpe_education
-    from src.loaders.bdnb import load_bdnb_building_usage, employment_ids
+    from src.loaders.bdnb import load_bdnb_building_usage, load_bdnb_building_attrs, employment_ids
     from src.loaders.buildings import load_all_buildings, prepare_residential, absorb_slivers
     from src.matching.spatial_join import join_buildings_to_insee
     from src.matching.allocator import allocate_population
     from src.matching.agents import generate_agents
-    from src.output.export import merge_buildings, export_buildings, export_agents
+    from src.output.export import merge_buildings, export_buildings, export_env, export_agents
 
     cfg = load_config(config_path)
     out_dir = cfg.output_dir
@@ -388,6 +390,9 @@ def step_env(verbose: bool = False, config_path: str = "config.yaml", assume_yes
     if cfg.buildings_absorb_slivers:
         buildings_all, _ = absorb_slivers(buildings_all, max_area=cfg.buildings_sliver_max_area)
     buildings_all["usage_bdnb"] = buildings_all["ID"].map(bdnb_usage)  # annotation (QGIS/GAMA)
+    # Attributs de vulnérabilité (matériaux + période, BDNB ffo) pour le module de
+    # crise (NN D1-D5). Colonnes présentes même sans BDNB (valeurs nulles).
+    buildings_all = buildings_all.merge(load_bdnb_building_attrs(bdnb_path), on="ID", how="left")
     buildings = prepare_residential(buildings_all, osm_gdf=osm_gdf,
                                     bdnb_usage=bdnb_usage,
                                     min_floor_area=cfg.buildings_min_floor_area)
@@ -414,9 +419,11 @@ def step_env(verbose: bool = False, config_path: str = "config.yaml", assume_yes
     if not agents.empty:
         agents.to_file(out_dir / "agents.gpkg", driver="GPKG")
 
-    # 7. Export pour GAMA — couche bâtiment unique (tous + population) + agents
+    # 7. Export pour GAMA — couche complète (tous + population) + contrat env + agents
     log.info("[7/7] Export")
-    export_buildings(merge_buildings(buildings_all, result), out_dir)
+    merged = merge_buildings(buildings_all, result)
+    export_buildings(merged, out_dir)
+    export_env(merged, out_dir, workplace_usages=cfg.workplace_usages)
     export_agents(agents, out_dir)
     log.info("=== Environnement généré dans %s ===", out_dir)
 

@@ -40,7 +40,7 @@ env_generator/
 │   │   ├── insee.py             # carreaux Filosofi (Ind_total)
 │   │   ├── roads.py             # réseau routier OSM (osmnx, walk/drive) -> Lambert-93
 │   │   ├── bpe.py               # BPE 2024 : équipements éducatifs géolocalisés (crèche/école/collège/lycée)
-│   │   ├── bdnb.py              # BDNB (CSTB) : usage bâtiment (residentiel/travail/annexe) -> qualifie les Indifférencié
+│   │   ├── bdnb.py              # BDNB (CSTB) : usage (residentiel/travail/annexe) -> qualifie Indiff. ; + matériaux/période (ffo) pour vulnérabilité
 │   │   └── mobpro.py            # flux domicile-travail INSEE (MOBPRO 2022) — calage futur
 │   ├── matching/
 │   │   ├── spatial_join.py      # centroïdes bâtiments ↔ grille (porte les colonnes âge/CSP)
@@ -48,7 +48,7 @@ env_generator/
 │   │   ├── agents.py            # génère les individus (âge + CSP + domicile + travail)
 │   │   └── workplaces.py        # affectation gravitaire d'un lieu de travail aux actifs
 │   ├── output/
-│   │   ├── export.py            # merge_buildings + export_buildings (couche unique) ; export_agents
+│   │   ├── export.py            # merge_buildings + export_buildings (complète) ; build_env_layer/export_env (contrat env) ; export_agents
 │   │   ├── visualize.py         # carte
 │   │   ├── compare.py / compare_grid.py  # validation vs recensement
 │   │   └── casualties.py        # victimes/sans-abris depuis dommages D1..D5
@@ -109,16 +109,25 @@ affecte par activité une destination tirée par `P(j|i) ∝ capacité_j × exp(
   proximité dominante) ; `education.decay_m` (déf. 1200 m, plus court — on
   scolarise au plus proche). Collège/lycée retombent sur le pool « école » si vide.
 
-Sorties (`output/export.py`) :
-- **`buildings.{geojson,csv,shp}`** — **couche bâtiment unique** : tous les bâtiments
+Sorties (`output/export.py`) — pensées pour **3 modules** (env_generator
+indépendant de la crise → crisis_gen → simulation) :
+- **`buildings.{geojson,csv,shp}`** — **couche complète** : tous les bâtiments
   de la région (`merge_buildings`), toutes colonnes, `population_allouee` (0 si
-  non-logement), flag `residentiel`, `usage_bdnb`, CSP/âge. Remplace l'ancien couple
-  `buildings_full` (résidentiels) / `buildings_all` (tous, sans pop) — distinction
-  source de confusion. `buildings_light.*` = vue allégée (ID + géom + residentiel +
-  population + CSP).
+  non-logement), flag `residentiel`, `usage_bdnb`, CSP/âge, matériaux/période BDNB.
+  Superset d'inspection QGIS + source pop actuelle de `casualties.py`. Remplace
+  l'ancien couple `buildings_full`/`buildings_all`.
+- **`env.{geojson,csv,shp}`** (`build_env_layer`/`export_env`) — **contrat de
+  simulation** curaté, *sans* population, indépendant de la crise (remplace
+  `buildings_light`) : `ID`, géométrie, flags de rôle (`is_residential`,
+  `is_workplace` ; éducation/stratégique différés), profil vertical (`n_etages`,
+  `hauteur`, `emprise_m2`, `z_min_sol`, `z_max_toit` → capacité de refuge calculée
+  côté crisis_gen selon la cote), vulnérabilité (`mat_mur`, `mat_toit`,
+  `annee_construction` — BDNB ffo, pour le NN D1-D5).
 - **`agents.gpkg` / `agents.geojson` / `agents.csv`** (colonnes : `agent_id`,
   `home_id`, `age`, `age_band`, `csp`, `activity`, `is_worker`, `dest_id`,
-  `dest_x/y`, `dist_m`, géométrie = point domicile).
+  `dest_x/y`, `dist_m`, géométrie = point domicile). **Source unique de la
+  population** (population/bâtiment = `groupby(home_id)` ; le *nombre* par bâtiment
+  est déterministe, le seed ne change que *qui* sont les agents).
 
 **Qualification des bâtiments via BDNB (`loaders/bdnb.py`).** `usage_principal_bdnb_open`
 → catégorie (`travail` / `residentiel` / `annexe`), carte ID bâtiment → catégorie
@@ -137,6 +146,10 @@ La couche bâtiment exportée porte une colonne `usage_bdnb` (inspection QGIS/GA
 Sur la région : ~+4 500 lieux de travail récupérés, ~17 800 faux logements
 écartés (chiffre aligné sur METHODE.md § 3.4). NB : OSM ne couvre ici que les bâtiments tagués flats/levels (apport
 faible sur les Indifférencié) ; la BDNB fait l'essentiel.
+`load_bdnb_building_attrs` extrait en plus les **matériaux + année de construction**
+(`ffo_bat_mat_mur_txt`/`_toit_txt`, `ffo_bat_annee_construction` ; couverture mesurée
+~64 % / 58 %, bien mieux que `MAT_MURS` BD TOPO ~35 % en codes cryptiques) → portés
+dans le contrat `env` pour le réseau de neurones D1-D5 (module crise).
 
 **Équipements éducatifs (`loaders/bpe.py`).** Source autoritaire (BPE 2024, INSEE) :
 `load_bpe_education(departement)` télécharge le fichier détail (~157 Mo, cache
@@ -170,7 +183,7 @@ branché** : réservé au calage futur des `decay_m` (gravitaire non calibré).
 | **OSM — bâtiments** (Overpass) | live | `loaders/osm.py` | **Enrichissement** du bâti : `building:flats`/`levels`, tag usage (filtre résidentiel). | Active — secondaire | https://www.openstreetmap.org |
 | **OSM — réseau routier** (osmnx) | live | `loaders/roads.py` | Réseau routier piéton + voiture (Lambert-93). | Active | https://www.openstreetmap.org |
 | **BPE** (INSEE) | 2024 | `loaders/bpe.py` | **Équipements éducatifs géolocalisés** (`TYPEQU`) : crèche/école/collège/lycée. | Active | https://www.insee.fr/fr/statistiques/8217525 |
-| **BDNB** (CSTB) | local (~2,5 Go) | `loaders/bdnb.py` | `usage_principal_bdnb_open` → catégorie (travail / résidentiel / annexe) : **qualifie les « Indifférencié »** BD TOPO. Ajoute des lieux de travail ET affine le filtre résidentiel (exclut les faux logements). Annote la couche bâtiment (`usage_bdnb`). | **Active** (optionnelle) | https://bdnb.io |
+| **BDNB** (CSTB) | local (~2,5 Go) | `loaders/bdnb.py` | `usage_principal_bdnb_open` → catégorie (travail / résidentiel / annexe) : **qualifie les « Indifférencié »** BD TOPO. Ajoute des lieux de travail ET affine le filtre résidentiel. Annote `usage_bdnb`. **Aussi : matériaux/période** (`ffo_bat_*`, `load_bdnb_building_attrs`) → contrat `env` pour la vulnérabilité (NN D1-D5). | **Active** (optionnelle) | https://bdnb.io |
 | **MOBPRO** (INSEE) | 2022 | `loaders/mobpro.py` | Flux domicile-travail commune→commune. | **Réservée** — calage futur, non branchée | https://www.insee.fr/fr/statistiques/8582949 |
 
 > Toutes les sources distantes passent par le **pipeline de cache unique**
