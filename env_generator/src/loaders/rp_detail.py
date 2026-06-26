@@ -71,12 +71,17 @@ STAT_GSEC_TO_CSP: dict[str, str] = {
     "14": "csp_prof_intermediaires",   "24": "csp_prof_intermediaires",
     "15": "csp_employes",              "25": "csp_employes",
     "16": "csp_ouvriers",              "26": "csp_ouvriers",
-    # Inactifs — répartition PROVISOIRE entre les deux buckets `iris.py`, à caler
-    # sur les totaux IRIS réels à la brique 2 (reweighting). 20 = chômeur jamais
-    # travaillé ; 31 = étudiant 14+ ; 32 = retraité ; 33 = au foyer/autre inactif.
-    "20": "csp_chomeurs_inactifs",
+    # Inactifs — alignés sur le CODE base-ic, PAS sur le label (mesuré sur la
+    # région vs base-ic : GSEC32 ≈ GSEC40, et le code détail "32" = retraités colle
+    # littéralement au "GSEC32"). ⚠️ Le label `csp_chomeurs_inactifs` d'iris.py
+    # (GSEC32) est un abus de langage : il désigne en fait les RETRAITÉS. On garde
+    # l'alignement par colonne (le label vit dans iris.py), pas par sémantique.
+    #   32 = retraités                       → csp_chomeurs_inactifs (= GSEC32)
+    #   20 chômeur jamais travaillé / 31 étudiant 14+ / 33 au foyer ou autre inactif
+    #                                        → csp_autres_inactifs   (= GSEC40)
+    "32": "csp_chomeurs_inactifs",
+    "20": "csp_autres_inactifs",
     "31": "csp_autres_inactifs",
-    "32": "csp_autres_inactifs",
     "33": "csp_autres_inactifs",
     "ZZ": "csp_autres_inactifs",       # hors champ (mineurs < 15) — écrasé par "mineur"
 }
