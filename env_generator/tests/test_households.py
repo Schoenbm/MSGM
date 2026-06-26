@@ -78,6 +78,18 @@ def test_reweighter_hits_iris_targets():
     assert q["rel_err"].abs().max() < 1e-3
 
 
+def test_centenarian_lands_in_top_age_band():
+    # AGED va jusqu'à ~108 ; la tranche age_80p plafonne à 99. Un centenaire doit
+    # être rabattu sur age_80p, pas disparaître du calage.
+    members = pd.DataFrame([
+        _member("h1", "i", 103, "referent", "csp_chomeurs_inactifs"),
+    ])
+    rw = HouseholdReweighter(members)
+    row = dict(zip(rw.constraint_cols, rw.A[0]))
+    assert row["age_80p"] == 1
+    assert sum(row[c] for c in AGE_COLS) == 1  # compté une fois, pas perdu
+
+
 def test_reweighter_referent_weight_used_as_init():
     # Le poids initial du ménage = IPONDI du référent.
     members = pd.DataFrame([

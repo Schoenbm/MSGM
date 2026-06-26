@@ -35,10 +35,18 @@ CSP_COLS: tuple[str, ...] = ALL_CSP_COLS
 
 
 def _age_band(age: "pd.Series") -> "pd.Series":
-    """Affecte chaque âge entier à sa tranche INSEE (clé de AGE_BANDS)."""
+    """Affecte chaque âge entier à sa tranche INSEE (clé de AGE_BANDS).
+
+    Les âges au-delà de la borne haute de la dernière tranche (AGE_BANDS plafonne
+    `age_80p` à 99, hérité d'agents.py) sont **rabattus** sur cette tranche : sans
+    ça, les centenaires (AGED va jusqu'à ~108) tomberaient en NA et fuiraient
+    silencieusement le calage d'âge.
+    """
+    hi_max = max(hi for _, hi in AGE_BANDS.values())
+    clipped = age.clip(upper=hi_max)
     band = pd.Series(pd.NA, index=age.index, dtype=object)
     for name, (lo, hi) in AGE_BANDS.items():
-        band[(age >= lo) & (age <= hi)] = name
+        band[(clipped >= lo) & (clipped <= hi)] = name
     return band
 
 
@@ -147,6 +155,7 @@ def ipu(
     """
     w = init_weight.astype(float).copy()
     cols = [A[:, c] for c in range(A.shape[1])]  # vues colonnes réutilisées
+    max_dev = 0.0  # défini hors boucle (sûreté si n_iter=0 → clause else)
     for it in range(n_iter):
         max_dev = 0.0
         for c, col in enumerate(cols):
