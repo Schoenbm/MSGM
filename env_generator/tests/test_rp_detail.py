@@ -81,20 +81,41 @@ def test_filters_department(tmp_path, monkeypatch):
     assert df["hh_id"].iloc[0] == "3801_1"
 
 
-def test_filters_communes_prefix(tmp_path, monkeypatch):
+def test_filters_communes_by_iris_prefix(tmp_path, monkeypatch):
+    # La commune = IRIS[:5] (PAS le CANTVILLE). Ici deux pseudo-cantons distincts,
+    # on ne garde que la commune 38185 (IRIS 381850000).
     rows = [
-        _row("3801", "1", "38", "385010000", "030", "1", "1", "15", "1.0"),
-        _row("3815", "1", "38", "381850000", "030", "1", "1", "15", "1.0"),
+        _row("3801", "1", "38", "385010000", "030", "1", "1", "15", "1.0"),  # commune 38501
+        _row("3802", "1", "38", "381850000", "030", "1", "1", "15", "1.0"),  # commune 38185
     ]
-    df = _load(tmp_path, monkeypatch, rows, departement="38", communes=["3815"])
+    df = _load(tmp_path, monkeypatch, rows, departement="38", communes=["38185"])
     assert len(df) == 1
-    assert df["hh_id"].iloc[0] == "3815_1"
+    assert df["hh_id"].iloc[0] == "3802_1"
+    assert df["iris"].iloc[0].startswith("38185")
 
 
 def test_weight_preserved_as_float(tmp_path, monkeypatch):
     rows = [_row("3801", "1", "38", "385010000", "030", "1", "1", "15", "1.234567")]
     df = _load(tmp_path, monkeypatch, rows)
     assert abs(df["weight"].iloc[0] - 1.234567) < 1e-9
+
+
+def test_collective_housing_become_singletons(tmp_path, monkeypatch):
+    # LPRM=Z (communautés : EHPAD, foyers...) : NON exclus (ils comptent dans les
+    # marges base-ic), mais chacun devient un ménage SINGLETON — l'EHPAD ne forme
+    # plus un faux ménage de N personnes via un NUMMI placeholder partagé.
+    rows = [
+        _row("3801", "100", "38", "385010000", "040", "1", "1", "13", "1.0"),  # ménage ordinaire
+        _row("3801", "900", "38", "385010000", "077", "2", "Z", "32", "1.0"),  # collectif 1
+        _row("3801", "900", "38", "385020000", "078", "2", "Z", "32", "1.0"),  # collectif 2 (même NUMMI)
+    ]
+    df = _load(tmp_path, monkeypatch, rows, departement="38")
+    # 3 ménages : 1 ordinaire + 2 singletons collectifs (PAS 1 faux ménage de 2)
+    assert df["hh_id"].nunique() == 3
+    z = df[df["role"] == "hors_menage"]
+    assert len(z) == 2 and z["hh_id"].nunique() == 2  # ids distincts
+    # le ménage ordinaire reste groupé normalement
+    assert (df["hh_id"] == "3801_100").sum() == 1
 
 
 def test_empty_when_department_absent(tmp_path, monkeypatch):

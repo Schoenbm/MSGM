@@ -25,6 +25,7 @@ import logging
 import zipfile
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from .cache import ensure_cached, valid_zip
@@ -118,10 +119,10 @@ def load_rp_households(
 
     Args:
         departement: code département à conserver (filtre `DEPT`). Défaut Isère "38".
-        communes:    si fourni, restreint aux communes dont le `CANTVILLE` commence
-                     par l'un de ces préfixes (pseudo-cantons). `None` = tout le
-                     département (recommandé : plus l'échantillon est large, plus le
-                     reweighting IPF par IRIS est stable).
+        communes:    si fourni, restreint aux individus dont la **commune**
+                     (`IRIS[:5]`, codes INSEE 5 chiffres) figure dans la liste.
+                     `None` = tout le département (recommandé : plus l'échantillon
+                     est large, plus le reweighting IPF par IRIS est stable).
         url:         URL du fichier détail Zone E (millésime 2022 par défaut).
         cache_dir:   répertoire de cache (défaut : data/cache).
 
@@ -150,7 +151,7 @@ def load_rp_households(
     )
 
     dep = str(departement).strip()
-    prefixes = tuple(communes) if communes else None
+    communes_set = set(communes) if communes else None
 
     parts: list[pd.DataFrame] = []
     with zipfile.ZipFile(archive) as z:
@@ -158,8 +159,11 @@ def load_rp_households(
             for chunk in pd.read_csv(f, sep=";", usecols=_USECOLS, dtype=str,
                                      chunksize=_CHUNK, low_memory=False):
                 keep = chunk[chunk["DEPT"] == dep]
-                if prefixes is not None and not keep.empty:
-                    keep = keep[keep["CANTVILLE"].str.startswith(prefixes)]
+                if communes_set is not None and not keep.empty:
+                    # Commune = IRIS[:5] (le fichier n'a pas de colonne COMMUNE ;
+                    # IRIS = commune 5 + iris 4). Surtout pas CANTVILLE, qui code le
+                    # pseudo-canton et n'a aucun lien avec le code commune INSEE.
+                    keep = keep[keep["IRIS"].str[:5].isin(communes_set)]
                 if not keep.empty:
                     parts.append(keep)
 
@@ -189,8 +193,21 @@ def _build_members(raw: pd.DataFrame) -> pd.DataFrame:
     csp = raw["STAT_GSEC"].map(STAT_GSEC_TO_CSP).fillna("csp_autres_inactifs")
     csp = csp.where(~is_minor, MINOR_CSP)  # < 18 ans → "mineur", peu importe STAT_GSEC
 
+    # Identifiant ménage = CANTVILLE + NUMMI. EXCEPTION : les individus « hors
+    # logement ordinaire » (LPRM=Z : communautés — EHPAD, foyers, internats,
+    # casernes…) ont un NUMMI placeholder réutilisé → groupés, ils forment de faux
+    # « ménages » (un EHPAD = 22 retraités sous un même NUMMI, parfois sur plusieurs
+    # IRIS). On en fait des **ménages singletons** (un id unique chacun) : ils restent
+    # dans l'échantillon (base-ic les compte dans les marges P22_POP/C22_*, sinon le
+    # calage IPU casse) sans qu'on déverse un EHPAD entier dans un logement.
+    hh_id = raw["CANTVILLE"].astype(str) + "_" + raw["NUMMI"].astype(str)
+    is_collective = (raw["LPRM"] == "Z").to_numpy()
+    if is_collective.any():
+        uniq = pd.Series("Zc_" + np.arange(len(raw)).astype(str), index=raw.index)
+        hh_id = hh_id.where(~is_collective, uniq)
+
     out = pd.DataFrame({
-        "hh_id": raw["CANTVILLE"].astype(str) + "_" + raw["NUMMI"].astype(str),
+        "hh_id": hh_id,
         "iris": raw["IRIS"].astype(str),
         "age": age,
         "sexe": raw["SEXE"].astype(str),

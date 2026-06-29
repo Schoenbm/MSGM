@@ -37,16 +37,15 @@ CSP_COLS: tuple[str, ...] = ALL_CSP_COLS
 def _age_band(age: "pd.Series") -> "pd.Series":
     """Affecte chaque âge entier à sa tranche INSEE (clé de AGE_BANDS).
 
-    Les âges au-delà de la borne haute de la dernière tranche (AGE_BANDS plafonne
-    `age_80p` à 99, hérité d'agents.py) sont **rabattus** sur cette tranche : sans
-    ça, les centenaires (AGED va jusqu'à ~108) tomberaient en NA et fuiraient
-    silencieusement le calage d'âge.
+    Les âges hors de toute tranche (AGED > 99, ~150 centenaires sur 310k ; ou âge
+    inconnu) tombent en NA et ne contribuent à aucune contrainte d'âge — assumé, et
+    négligeable. ⚠️ NE PAS les rabattre sur age_80p (`clip`) : mesuré, ça rend le
+    calage IPU **infaisable** (médiane d'erreur 0,12 % → 6 %, l'erreur ne baisse
+    plus même à 3000 itérations). Régression réelle écartée, ne pas réintroduire.
     """
-    hi_max = max(hi for _, hi in AGE_BANDS.values())
-    clipped = age.clip(upper=hi_max)
     band = pd.Series(pd.NA, index=age.index, dtype=object)
     for name, (lo, hi) in AGE_BANDS.items():
-        band[(clipped >= lo) & (clipped <= hi)] = name
+        band[(age >= lo) & (age <= hi)] = name
     return band
 
 
