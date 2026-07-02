@@ -58,6 +58,7 @@ Pipeline `python -m src.main --step env` (piloté par `config.yaml`), tout en
 | **BPE** (INSEE) | 2024 | `loaders/bpe.py` | Équipements éducatifs géolocalisés (crèche/école/collège/lycée) | Active |
 | **BDNB** (CSTB) | local ~2,5 Go | `loaders/bdnb.py` | Usage (qualifie les Indifférencié) **+ matériaux/période** (`ffo_bat_*`) pour la vulnérabilité (NN D1-D5) | Active (optionnelle) |
 | MOBPRO (INSEE) | 2022 | `loaders/mobpro.py` | Flux domicile-travail commune→commune | **Réservée** (non branchée) |
+| **RP détail — Individus canton-ou-ville** (INSEE) | 2022 | `loaders/rp_detail.py` | **Échantillon de ménages réels** (membres, âge, CSP, rôle) pour la génération sample-based en ménages | **Chantier ménages** (briques 1-2 faites, non branchée) |
 
 Toutes les sources distantes passent par le **cache unique** (`loaders/cache.py`,
 `ensure_cached` : check local → contrôle d'intégrité → (re)production atomique).
@@ -227,7 +228,9 @@ crise**) → **crisis_gen** (NN D1-D5, inondation, capacité de refuge selon la 
 ## 7. Hypothèses & limites connues
 
 - Âge et CSP tirés comme **marges indépendantes** (pas de table jointe âge×CSP type
-  IPF/gospl) → marges respectées en espérance, pas exactement.
+  IPF/gospl) → marges respectées en espérance, pas exactement. **Sans ménages** :
+  enfants sans parent rattaché. → adressé par le **chantier ménages** (sample-based,
+  briques 1-2 faites ; § 8 et `claude.md`).
 - **Gravitaires non calibrés** (decays au doigt mouillé) — calage MOBPRO réservé.
 - Capacité des équipements éducatifs **uniforme** (donnée BPE absente).
 - 15-17 ans comptés en **mineurs côté CSP** (léger écart avec la pop INSEE « 15+ »).
@@ -240,6 +243,23 @@ crise**) → **crisis_gen** (NN D1-D5, inondation, capacité de refuge selon la 
 
 ## 8. Chantiers à venir
 
+0. **Population en ménages (sample-based) — PRIORITAIRE, briques 1-2 faites.**
+   Remplacer le tirage d'**individus indépendants** (§ 3.7, sans ménage ni lien
+   parent→enfant) par des **ménages réels** tirés d'un échantillon INSEE et calés
+   par IRIS. Débloque le **regroupement familial** en évacuation.
+   - **Brique 1 (faite)** `loaders/rp_detail.py` : échantillon de ménages réels
+     (RP détail Individus canton-ou-ville 2022 ; `hh_id`, `role` via `LPRM`, âge,
+     CSP, `IPONDI`).
+   - **Brique 2 (faite)** `matching/households.py` : **IPU** qui repondère le pool
+     sur les marges `age_*`/`csp_*` de chaque IRIS (collapse en types ; validé
+     médiane 0,12 %).
+   - **Brique 3 (à faire)** : par bâtiment, tirer `menages_alloues` ménages ∝ poids
+     IPU de l'IRIS, instancier les membres. **Décision** : honorer le *nombre* de
+     ménages et laisser la population suivre les vraies tailles (option A).
+   - **Brique 4 (à faire)** : refonte `agents.py` (`household_id` + rôle) + câblage.
+   - Détail complet, décisions verrouillées et **pièges à ne pas refaire** (faux
+     ménages de communautés `LPRM=Z`, label `csp_chomeurs_inactifs`=retraités, ne
+     pas clipper les centenaires) : `claude.md` § « population en ménages ».
 1. **Brancher MOBPRO** — caler le gravitaire domicile-travail (affectation 2 étapes :
    tirer la commune de travail via flux MOBPRO, puis bâtiment par gravité). Notes
    détaillées dans `claude.md` (§ Chantier MOBPRO).

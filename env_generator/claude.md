@@ -41,19 +41,21 @@ env_generator/
 │   │   ├── roads.py             # réseau routier OSM (osmnx, walk/drive) -> Lambert-93
 │   │   ├── bpe.py               # BPE 2024 : équipements éducatifs géolocalisés (crèche/école/collège/lycée)
 │   │   ├── bdnb.py              # BDNB (CSTB) : usage (residentiel/travail/annexe) -> qualifie Indiff. ; + matériaux/période (ffo) pour vulnérabilité
-│   │   └── mobpro.py            # flux domicile-travail INSEE (MOBPRO 2022) — calage futur
+│   │   ├── mobpro.py            # flux domicile-travail INSEE (MOBPRO 2022) — calage futur
+│   │   └── rp_detail.py         # RP détail (indiv. canton-ou-ville 2022) : échantillon de ménages réels — chantier ménages (non branché)
 │   ├── matching/
 │   │   ├── spatial_join.py      # centroïdes bâtiments ↔ grille (porte les colonnes âge/CSP)
 │   │   ├── allocator.py         # allocation pop/ménages + âge/CSP (plus fort reste)
 │   │   ├── agents.py            # génère les individus (âge + CSP + domicile + travail)
-│   │   └── workplaces.py        # affectation gravitaire d'un lieu de travail aux actifs
+│   │   ├── workplaces.py        # affectation gravitaire d'un lieu de travail aux actifs
+│   │   └── households.py        # reweighting IPU du pool de ménages sur les marges IRIS — chantier ménages (non branché)
 │   ├── output/
 │   │   ├── export.py            # merge_buildings + export_buildings (complète) ; build_env_layer/export_env (contrat env) ; export_agents
 │   │   ├── visualize.py         # carte
 │   │   ├── compare.py / compare_grid.py  # validation vs recensement
 │   │   └── casualties.py        # victimes/sans-abris depuis dommages D1..D5
 │   └── utils/logging_config.py
-└── tests/                       # pytest (~305 tests)
+└── tests/                       # pytest (~366 tests ; test_rp_realdata.py skippé si cache absent)
 ```
 
 > ⚠️ `loaders/osm.py` concerne les **bâtiments** (tags flats/levels), PAS le
@@ -185,6 +187,7 @@ branché** : réservé au calage futur des `decay_m` (gravitaire non calibré).
 | **BPE** (INSEE) | 2024 | `loaders/bpe.py` | **Équipements éducatifs géolocalisés** (`TYPEQU`) : crèche/école/collège/lycée. | Active | https://www.insee.fr/fr/statistiques/8217525 |
 | **BDNB** (CSTB) | local (~2,5 Go) | `loaders/bdnb.py` | `usage_principal_bdnb_open` → catégorie (travail / résidentiel / annexe) : **qualifie les « Indifférencié »** BD TOPO. Ajoute des lieux de travail ET affine le filtre résidentiel. Annote `usage_bdnb`. **Aussi : matériaux/période** (`ffo_bat_*`, `load_bdnb_building_attrs`) → contrat `env` pour la vulnérabilité (NN D1-D5). | **Active** (optionnelle) | https://bdnb.io |
 | **MOBPRO** (INSEE) | 2022 | `loaders/mobpro.py` | Flux domicile-travail commune→commune. | **Réservée** — calage futur, non branchée | https://www.insee.fr/fr/statistiques/8582949 |
+| **RP détail — Individus canton-ou-ville** (INSEE) | 2022 | `loaders/rp_detail.py` | **Échantillon de ménages réels** (membres + âge + CSP + rôle `LPRM`) pour la génération sample-based en ménages. Zone E (contient l'Isère). | **Chantier ménages** — briques 1-2 faites, non branchée | https://www.insee.fr/fr/statistiques/8647104 |
 
 > Toutes les sources distantes passent par le **pipeline de cache unique**
 > (`loaders/cache.py`, `ensure_cached`). Millésimes couplés au code (RP/MOBPRO 2022,
@@ -229,6 +232,62 @@ branché** : réservé au calage futur des `decay_m` (gravitaire non calibré).
   loaders réseau (osmnx/overpy) sont mockés dans les tests — pour la correctness
   réelle, faire un smoke test sur une petite emprise.
 - Commits : messages clairs, ne committer que sur demande.
+
+---
+
+## Chantier — population en ménages (sample-based) — briques 1-2 faites
+
+**Pourquoi.** `agents.py` tire aujourd'hui des **individus indépendants** par
+bâtiment (marges `age_*`/`csp_*` séparées), **sans ménage ni lien parent→enfant** :
+un enfant est posé sans parent rattaché. Trou structurel pour une sim d'évacuation
+(le regroupement familial — parents qui vont chercher leurs enfants — est un
+déterminant comportemental majeur). Prioritaire **devant** MOBPRO (qui n'est que du
+raffinage de destination).
+
+**Approche = sample-based** (ménages réels INSEE), **pas** de reconstruction IPF
+d'une table jointe. Source : fichier détail **Individus canton-ou-ville RP 2022**
+(`loaders/rp_detail.py`). Calage local par **IPU** (`matching/households.py`).
+
+**État :**
+- **Brique 1 (faite)** `loaders/rp_detail.py` — `load_rp_households(dep, communes=None)`
+  reconstruit un échantillon de ménages réels : `hh_id` (= `CANTVILLE`+`NUMMI`),
+  `role` (depuis `LPRM` : référent/conjoint/enfant → **lien parent→enfant**), `age`,
+  `csp` (alignée sur les `csp_*` d'`iris.py`), `iris`, `weight` (`IPONDI`).
+- **Brique 2 (faite)** `matching/households.py` — `HouseholdReweighter(members)` +
+  `weights_for(age_targets, csp_targets)` : IPU qui repondère le pool (collapse en
+  ~9k types → ~400 ms/IRIS) pour caler les marges IRIS. Validé région : erreur
+  médiane 0,12 %.
+- **Brique 3 (à faire)** tirage : par bâtiment, échantillonner `menages_alloues`
+  (déjà calculé par `allocator.py`) ménages ∝ poids IPU de l'IRIS du bâtiment,
+  instancier les membres.
+- **Brique 4 (à faire)** refonte `agents.py` (`household_id` + rôle, lien
+  parent→enfant) + câblage `step_env`.
+
+**Décision brique 3 (à trancher au démarrage) :** honorer le **nombre de ménages**
+(`menages_alloues`) et laisser la population suivre les **vraies tailles** de
+ménages (option A, recommandée) — plus fidèle, mais la population/bâtiment bouge vs
+l'allocateur actuel (rippe sur `casualties.py`). L'allocation par bâtiment des
+`age_*`/`csp_*` (`allocator._allocate_csp_columns`) devient alors **vestigiale** pour
+la *génération*.
+
+**Pièges / décisions verrouillées (NE PAS refaire) :**
+- **Communautés `LPRM=Z`** (EHPAD, foyers, internats) : leur `NUMMI` est un
+  placeholder partagé → groupées, elles formaient de **faux ménages** (un EHPAD = un
+  « ménage » de 22 personnes, collisions multi-IRIS). Chaque hors-ménage est un
+  **singleton** (`hh_id` `Zc_*`), gardé pour les marges base-ic.
+- Le label **`csp_chomeurs_inactifs`** d'`iris.py` (`GSEC32`) est un **abus de
+  langage : ce sont les RETRAITÉS**. Le mapping `STAT_GSEC` d'`rp_detail.py` s'aligne
+  sur le **code**, pas sur le label.
+- **NE PAS rabattre (`clip`) les âges >99 sur `age_80p`** : mesuré, ça rend le calage
+  IPU **infaisable** (médiane 0,12 % → 6 %). Les ~150 centenaires restent hors
+  tranche d'âge (négligeable).
+- **Filtre commune = `IRIS[:5]`**, PAS `CANTVILLE` (pseudo-canton, code sans rapport).
+
+**Tests de non-régression** : `tests/test_rp_realdata.py` (skippé si le cache
+`data/cache/RP2022_indcvize.zip` est absent) vérifie sur le **vrai** fichier les
+propriétés émergentes que les mocks ratent (0 ménage multi-IRIS, 0 orphelin, taille
+≈ INSEE, fit IPU médiane < 1 %). **Leçon** : les mocks n'ont attrapé aucun des bugs
+ci-dessus ; valider sur données réelles avant de committer ce chantier.
 
 ---
 
