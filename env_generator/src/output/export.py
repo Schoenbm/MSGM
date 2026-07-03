@@ -20,6 +20,8 @@ _SHP_RENAME: dict[str, str] = {
     "annee_construction": "annee_con",
     "is_residential": "is_resid",
     "is_workplace": "is_workpl",
+    "is_strategic": "is_strat",
+    "is_education": "is_educ",
 }
 
 
@@ -97,16 +99,25 @@ def export_buildings(buildings: gpd.GeoDataFrame, output_dir: str | Path) -> Non
 def build_env_layer(
     buildings: gpd.GeoDataFrame,
     workplace_usages: "tuple[str, ...] | list[str]" = DEFAULT_WORKPLACE_USAGES,
+    fonctions: "dict[str, str] | None" = None,
 ) -> gpd.GeoDataFrame:
     """Compose le **contrat d'environnement** : faits physiques du bâtiment, sans
     population ni dépendance à la crise.
 
-    Colonnes : ID, geometry, flags de rôle (`is_residential`, `is_workplace`),
+    Colonnes : ID, geometry, flags de rôle (`is_residential`, `is_workplace`,
+    `is_education`, `is_strategic`), `fonction` (str détaillé : hopital, mairie…),
     profil vertical (`n_etages`, `hauteur`, `emprise_m2`, `z_min_sol`, `z_max_toit`
     → capacité de refuge calculée en aval selon la cote d'inondation), vulnérabilité
     (`mat_mur`, `mat_toit`, `annee_construction` — BDNB ffo, consommés par le NN
-    D1-D5). Rôles `is_education`/`is_strategic` différés (chantiers BPE/POI).
+    D1-D5).
+
+    Args:
+        buildings:        GeoDataFrame des bâtiments (merge_buildings ou all_buildings).
+        workplace_usages: usages BD TOPO considérés comme lieux de travail.
+        fonctions:        dict ID → fonction (str) issu de merge_fonctions (poi.py).
     """
+    from src.loaders.poi import EDUCATION_FONCTIONS, STRATEGIC_FONCTIONS
+
     b = buildings
     idx = b.index
     usage_usages = tuple(workplace_usages)
@@ -121,6 +132,13 @@ def build_env_layer(
     env["is_workplace"] = (
         u1.isin(usage_usages) | u2.isin(usage_usages) | (usage_bdnb == "travail")
     ).values
+
+    # Fonction et flags dérivés (stratégique / éducation)
+    fonctions = fonctions or {}
+    env["fonction"] = b["ID"].map(fonctions)
+    env["is_education"] = env["fonction"].isin(EDUCATION_FONCTIONS)
+    env["is_strategic"] = env["fonction"].isin(STRATEGIC_FONCTIONS)
+
     env["n_etages"] = _compute_nb_etages(b).round().astype(int).values
     env["hauteur"] = b.get("HAUTEUR", pd.Series(index=idx, dtype="float64")).values
     env["emprise_m2"] = b.geometry.area.round(1).values
@@ -135,18 +153,23 @@ def export_env(
     buildings: gpd.GeoDataFrame,
     output_dir: str | Path,
     workplace_usages: "tuple[str, ...] | list[str]" = DEFAULT_WORKPLACE_USAGES,
+    fonctions: "dict[str, str] | None" = None,
 ) -> None:
     """Exporte le contrat d'environnement `env.{geojson,csv,shp}` (cf. build_env_layer)."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    env = _sanitize_for_export(build_env_layer(buildings, workplace_usages))
+    env = _sanitize_for_export(build_env_layer(buildings, workplace_usages, fonctions=fonctions))
     _write_geojson(env, output_dir / "env.geojson")
     _write_csv(env.drop(columns=["geometry"]), output_dir / "env.csv")
     _write_shp(env, output_dir / "env.shp")
+    n_strat = int(env["is_strategic"].sum())
+    n_educ = int(env["is_education"].sum())
     logger.info(
-        "Export env (contrat simu) : %d bâtiments  |  %d travail, %d résidentiel",
+        "Export env (contrat simu) : %d bâtiments  |  %d travail, %d résidentiel, "
+        "%d stratégique, %d éducation",
         len(env), int(env["is_workplace"].sum()), int(env["is_residential"].sum()),
+        n_strat, n_educ,
     )
 
 

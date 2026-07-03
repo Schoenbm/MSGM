@@ -304,8 +304,9 @@ def step_env(verbose: bool = False, config_path: str = "config.yaml", assume_yes
     from src.loaders.roads import fetch_road_network
     from src.loaders.osm import fetch_osm_buildings
     from src.loaders.bpe import load_bpe_education
-    from src.loaders.bdnb import load_bdnb_building_usage, load_bdnb_building_attrs, employment_ids
+    from src.loaders.bdnb import load_bdnb_building_usage, load_bdnb_building_attrs, employment_ids, load_bdnb_erp
     from src.loaders.buildings import load_all_buildings, prepare_residential, absorb_slivers
+    from src.loaders.poi import fetch_osm_pois, match_pois_to_buildings, match_education_to_buildings, merge_fonctions
     from src.matching.spatial_join import join_buildings_to_insee
     from src.matching.allocator import allocate_population
     from src.matching.agents import generate_agents
@@ -397,15 +398,31 @@ def step_env(verbose: bool = False, config_path: str = "config.yaml", assume_yes
                                     bdnb_usage=bdnb_usage,
                                     min_floor_area=cfg.buildings_min_floor_area)
 
-    # 5. Allocation de la population aux bâtiments (sur la zone population)
-    log.info("[5/7] Allocation population")
+    # 5. POI stratégiques + éducation → colonne `fonction` (OSM + BDNB ERP + BPE)
+    log.info("[5/8] POI stratégiques et éducation")
+    departement = grid["CODE_IRIS"].iloc[0][:2] if not grid.empty else "38"
+    education = load_bpe_education(departement=departement)
+    # OSM amenities (hôpital, mairie, caserne, police, gare, stade, culte, EHPAD…)
+    osm_pois = fetch_osm_pois(region_gdf, cache_dir=out_dir)
+    osm_fonctions = match_pois_to_buildings(buildings_all, osm_pois)
+    # BPE éducation → footprint (ecole, college, lycee, creche)
+    edu_fonctions = match_education_to_buildings(buildings_all, education)
+    # BDNB ERP (grands ERP cat 1-2) en fallback
+    bdnb_erp_fonctions = load_bdnb_erp(bdnb_path)
+    # Fusion : OSM prime, puis éducation, puis BDNB ERP en fallback
+    fonctions = merge_fonctions(osm_fonctions, edu_fonctions, bdnb_erp_fonctions)
+    log.info("Fonctions taggées : %d bâtiments (%d stratégiques, %d éducation)",
+             len(fonctions),
+             sum(1 for f in fonctions.values() if f not in {"ecole", "college", "lycee", "creche"}),
+             sum(1 for f in fonctions.values() if f in {"ecole", "college", "lycee", "creche"}))
+
+    # 6. Allocation de la population aux bâtiments (sur la zone population)
+    log.info("[6/8] Allocation population")
     joined = join_buildings_to_insee(buildings, grid)
     result = allocate_population(joined)
 
-    # 6. Génération des agents (âge + CSP + domicile + destination travail/école/crèche)
-    log.info("[6/7] Génération des agents")
-    departement = grid["CODE_IRIS"].iloc[0][:2] if not grid.empty else "38"
-    education = load_bpe_education(departement=departement)
+    # 7. Génération des agents (âge + CSP + domicile + destination travail/école/crèche)
+    log.info("[7/8] Génération des agents")
     # Lieux de travail récupérés via la BDNB (catégorie "travail").
     workplace_extra_ids = employment_ids(bdnb_usage)
     agents = generate_agents(
@@ -419,11 +436,11 @@ def step_env(verbose: bool = False, config_path: str = "config.yaml", assume_yes
     if not agents.empty:
         agents.to_file(out_dir / "agents.gpkg", driver="GPKG")
 
-    # 7. Export pour GAMA — couche complète (tous + population) + contrat env + agents
-    log.info("[7/7] Export")
+    # 8. Export pour GAMA — couche complète (tous + population) + contrat env + agents
+    log.info("[8/8] Export")
     merged = merge_buildings(buildings_all, result)
     export_buildings(merged, out_dir)
-    export_env(merged, out_dir, workplace_usages=cfg.workplace_usages)
+    export_env(merged, out_dir, workplace_usages=cfg.workplace_usages, fonctions=fonctions)
     export_agents(agents, out_dir)
     log.info("=== Environnement généré dans %s ===", out_dir)
 

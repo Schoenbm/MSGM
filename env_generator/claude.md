@@ -121,7 +121,8 @@ indépendant de la crise → crisis_gen → simulation) :
 - **`env.{geojson,csv,shp}`** (`build_env_layer`/`export_env`) — **contrat de
   simulation** curaté, *sans* population, indépendant de la crise (remplace
   `buildings_light`) : `ID`, géométrie, flags de rôle (`is_residential`,
-  `is_workplace` ; éducation/stratégique différés), profil vertical (`n_etages`,
+  `is_workplace`, `is_education`, `is_strategic`) + colonne `fonction` (str :
+  hopital, mairie, ecole… via `loaders/poi.py`), profil vertical (`n_etages`,
   `hauteur`, `emprise_m2`, `z_min_sol`, `z_max_toit` → capacité de refuge calculée
   côté crisis_gen selon la cote), vulnérabilité (`mat_mur`, `mat_toit`,
   `annee_construction` — BDNB ffo, pour le NN D1-D5).
@@ -341,19 +342,29 @@ et/ou la matrice de flux commune→commune des agents à MOBPRO (étalon).
 
 ---
 
-## Chantier — bâtiments stratégiques (équipements / POI évacuation)
+## Bâtiments stratégiques (équipements / POI évacuation) — FAIT
 
-> Concrètement, ce chantier **remplit le flag `is_strategic`** du contrat `env`
-> (laissé de côté à la création du contrat). Idem `is_education` = matching
-> BPE→footprint. Cf. METHODE.md § 8.
+> Ce chantier **remplit les flags `is_strategic` / `is_education`** et la colonne
+> `fonction` du contrat `env` (laissés de côté à la création du contrat).
+> Implémenté dans `loaders/poi.py` (OSM amenities → footprint BD TOPO), câblé aux
+> étapes 5-8 de `step_env`, exporté par `build_env_layer`. Cf. METHODE.md § 8.
 
+**Ce qui est en place.** `fetch_osm_pois` requête Overpass les amenities
+stratégiques (hôpital, mairie, caserne, police, gare, stade, culte, EHPAD, centre
+commercial, gymnase, préfecture), `match_pois_to_buildings` les apparie au footprint
+BD TOPO (point-in-polygon pour les nœuds, chevauchement ≥ 30 % pour les polygones),
+`match_education_to_buildings` fait de même pour les points BPE, et `merge_fonctions`
+fusionne les sources avec **priorité OSM > éducation > BDNB ERP** (`load_bdnb_erp`,
+grands ERP cat 1-2 en fallback). Résultat : colonne `fonction` (str) + flags dérivés
+sur la couche `env`.
 
-**Constat (vérifié).** Les grands bâtiments-clés de l'évacuation **ne sont PAS
-filtrés** — ils sont dans la couche `buildings`. Mais la BD TOPO *bâti* est **sans
+**Constat d'origine (vérifié).** Les grands bâtiments-clés de l'évacuation **ne sont
+PAS filtrés** — ils sont dans la couche `buildings`. Mais la BD TOPO *bâti* est **sans
 nom** : ils sortent en `Indifférencié` anonymes. Exemples mesurés : Hôtel de Ville
 de Grenoble = `BATIMENT…302526662`, Indifférencié 923 m² (BDNB → `travail`) ; Stade
 des Alpes = Indifférencié 3 989 m² (BDNB → `travail`). Présents, mais non
-**identifiables** comme mairie / stade / hôpital.
+**identifiables** comme mairie / stade / hôpital — ce que la colonne `fonction`
+résout désormais.
 
 **Objectif.** Tagger une **fonction stratégique** sur les bâtiments (colonne
 `fonction`/`poi_type` sur la couche `buildings`) : mairie/préfecture, hôpital/clinique,
@@ -361,11 +372,17 @@ caserne pompiers (SDIS), police/gendarmerie, gare, lieu de culte, gymnase/stade,
 centre commercial, EHPAD… — pour modéliser PC de crise, refuges, points de
 rassemblement et populations vulnérables.
 
-**Lien thèse (important).** La cascade séisme→inondation porte l'injonction
-contradictoire **« évacuer les bâtiments » vs « évacuation verticale »**. D'où un
-attribut de **refuge vertical** : bâtiments hauts/robustes au-dessus de la cote
-d'inondation = refuges potentiels. La **hauteur** est déjà dispo (`HAUTEUR` /
-`NB_ETAGES`) → tagger l'aptitude au refuge vertical est directement utile aux QR.
+**Hors périmètre — refuge vertical (déféré crise/simulateur).** La cascade
+séisme→inondation porte l'injonction contradictoire **« évacuer les bâtiments » vs
+« évacuation verticale »**, d'où l'envie de tagger un **refuge vertical**. **Ce
+n'est PAS le rôle du générateur** : (1) « au-dessus de la cote » dépend d'un aléa
+(input du module crise), le générateur reste threat-agnostic ; (2) « refuge sûr »
+a **trois définitions non équivalentes** — sûr objectivement (crise), perçu par
+les autorités (message d'alerte), perçu par les agents (simulateur) — trancher ici
+injecterait un biais orienté-résultat (cf. principe de design METHODE.md). Le
+générateur livre seulement le **substrat physique** (`hauteur`, `n_etages`,
+`z_min_sol`, `z_max_toit`, déjà dans le contrat `env`) ; chaque module aval calcule
+sa propre aptitude au refuge à partir de ces faits bruts.
 
 **Sources, par ROI :**
 1. **OSM amenities nommées** (quick win, gratuit, bien mappé pour les gros
@@ -387,11 +404,12 @@ d'inondation = refuges potentiels. La **hauteur** est déjà dispo (`HAUTEUR` /
    (`bdtopo_equ_l_nature_detaillee` / `bdtopo_zoa_l_nature` / `_toponyme`) mais
    **mal renseignée** sur la zone (mesuré : `bdtopo_equ_l_nature_detaillee` = 0).
 
-**Premier pas conseillé** : OSM (1) pour les landmarks à fort enjeu (hôpital,
-mairie, caserne, police, gare, stade, culte, gymnase) → colonne `fonction` sur
-`buildings` ; puis enrichir avec l'ERP/patrimoine BDNB (2, gratuit, en main) et un
-attribut **refuge vertical** dérivé de la hauteur. Capacité d'accueil (ERP / BPE /
-surface) si on veut dimensionner les refuges.
+**Réalisé** : OSM (1) pour les landmarks à fort enjeu (hôpital, mairie, caserne,
+police, gare, stade, culte, gymnase) → colonne `fonction` sur `env`, enrichi par
+l'ERP BDNB (2, fallback). **Pistes restantes (optionnelles)** : patrimoine BDNB
+(`monument_historique` / `merimee_*`), BPE santé/sport/services publics (3),
+capacité d'accueil réelle (ERP / BPE / surface) si on veut dimensionner des refuges
+côté module aval.
 
 ## Indifférencié — état et leviers restants
 

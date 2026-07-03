@@ -96,6 +96,72 @@ def employment_ids(usage: "dict[str, str]") -> "set[str]":
     return {bid for bid, cat in usage.items() if cat == "travail"}
 
 
+# ── ERP (grands établissements recevant du public) ───────────────────────────
+
+# Catégories ERP DPE tertiaire BDNB → fonction stratégique.
+# Cat 1-2 = fort accueil public (> 1500 / > 700 personnes).
+# Le type_erp affine : on le mappe à une fonction quand c'est possible.
+_ERP_TYPE_TO_FONCTION: dict[str, str] = {
+    "Salle": "gymnase",
+    "Magasin": "centre_commercial",
+    "Centre commercial": "centre_commercial",
+    "Enseignement": "ecole",
+    "Hôpital": "hopital",
+    "Hôtel": "centre_commercial",
+}
+
+_ERP_CAT_COL = "dpe_ter_categorie_erp_dpe_tertiaire"
+_ERP_TYPE_COL = "dpe_ter_type_erp_dpe_tertiaire"
+
+
+def load_bdnb_erp(gpkg_path: "str | Path") -> "dict[str, str]":
+    """Carte ID bâtiment BD TOPO → fonction, depuis les grands ERP BDNB (cat 1-2).
+
+    Source optionnelle : dict vide si le gpkg est absent ou sans colonnes ERP.
+    Destiné à être fusionné en **fallback** après OSM (OSM prime).
+    """
+    if gpkg_path is None or not Path(gpkg_path).exists():
+        return {}
+    gpkg_path = Path(gpkg_path)
+
+    try:
+        comp = gpd.read_file(
+            gpkg_path, layer=_LAYER_COMPILE,
+            columns=["batiment_groupe_id", _ERP_CAT_COL, _ERP_TYPE_COL],
+            ignore_geometry=True,
+        )
+    except Exception:
+        logger.debug("Colonnes ERP absentes du gpkg BDNB — pas d'enrichissement ERP")
+        return {}
+
+    if _ERP_CAT_COL not in comp.columns:
+        return {}
+
+    # Garder cat 1-2 (grands ERP, fort accueil public)
+    cat = pd.to_numeric(comp[_ERP_CAT_COL], errors="coerce")
+    big_erp = comp[cat.notna() & (cat <= 2)].copy()
+    if big_erp.empty:
+        return {}
+
+    rel = gpd.read_file(
+        gpkg_path, layer=_LAYER_REL_BDTOPO,
+        columns=["bdtopo_bat_cleabs", "batiment_groupe_id"], ignore_geometry=True,
+    )
+
+    merged = rel.merge(big_erp, on="batiment_groupe_id", how="inner")
+    result: dict[str, str] = {}
+    for _, row in merged.iterrows():
+        cleabs = row["bdtopo_bat_cleabs"]
+        if pd.isna(cleabs) or cleabs in result:
+            continue
+        erp_type = row.get(_ERP_TYPE_COL, "")
+        fonction = _ERP_TYPE_TO_FONCTION.get(str(erp_type).strip(), "centre_commercial")
+        result[cleabs] = fonction
+
+    logger.info("BDNB ERP (cat 1-2) : %d bâtiments stratégiques", len(result))
+    return result
+
+
 # Attributs de vulnérabilité (fichiers fonciers BDNB) consommés par le module de
 # crise (réseau de neurones D1-D5). Meilleure couverture et libellés lisibles que
 # MAT_MURS/MAT_TOITS BD TOPO (codes à 2 chiffres). Couverture mesurée sur la

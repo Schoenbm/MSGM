@@ -263,12 +263,12 @@ crise**) → **crisis_gen** (NN D1-D5, inondation, capacité de refuge selon la 
 1. **Brancher MOBPRO** — caler le gravitaire domicile-travail (affectation 2 étapes :
    tirer la commune de travail via flux MOBPRO, puis bâtiment par gravité). Notes
    détaillées dans `claude.md` (§ Chantier MOBPRO).
-2. **Flags de rôle `is_education` / `is_strategic`** (contrat `env`, différés) :
-   - `is_education` : matching **BPE → footprint** (point-in-polygon) — BPE est
-     aujourd'hui en points séparés, pas rattaché aux bâtiments.
-   - `is_strategic` : tagger mairie/hôpital/caserne/gare/stade via **OSM nommé +
-     BDNB** (ERP, monument historique) — central pour la QR « évacuer vs évacuation
-     verticale ». Notes dans `claude.md`.
+2. ~~**Flags de rôle `is_education` / `is_strategic`**~~ — **FAIT** (`loaders/poi.py`,
+   étapes 5-8 de `step_env`, colonne `fonction` + flags dans le contrat `env`) :
+   - `is_education` : matching **BPE → footprint** (point-in-polygon).
+   - `is_strategic` : mairie/hôpital/caserne/gare/stade via **OSM nommé** apparié
+     au footprint (+ **BDNB ERP** cat 1-2 en fallback). Priorité OSM > éducation >
+     BDNB. Notes dans `claude.md` (§ Bâtiments stratégiques).
 3. **Capacité de refuge vertical** — *hors env_generator*, côté **crisis_gen** :
    dérivée du profil vertical (`n_etages`, `z_*`) et de la **cote d'inondation du
    scénario** (rupture totale ≠ partielle → refuges différents). env_generator
