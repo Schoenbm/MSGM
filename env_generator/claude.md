@@ -259,17 +259,41 @@ d'une table jointe. Source : fichier détail **Individus canton-ou-ville RP 2022
   ~9k types → ~400 ms/IRIS) pour caler les marges IRIS. Validé région : erreur
   médiane 0,12 %.
 - **Brique 3 (à faire)** tirage : par bâtiment, échantillonner `menages_alloues`
-  (déjà calculé par `allocator.py`) ménages ∝ poids IPU de l'IRIS du bâtiment,
-  instancier les membres.
+  (déjà calculé par `allocator.py`) ménages **avec remise** dans le pool entier
+  repondéré ∝ poids IPU de l'IRIS du bâtiment, instancier les membres réels.
 - **Brique 4 (à faire)** refonte `agents.py` (`household_id` + rôle, lien
   parent→enfant) + câblage `step_env`.
 
-**Décision brique 3 (à trancher au démarrage) :** honorer le **nombre de ménages**
-(`menages_alloues`) et laisser la population suivre les **vraies tailles** de
-ménages (option A, recommandée) — plus fidèle, mais la population/bâtiment bouge vs
-l'allocateur actuel (rippe sur `casualties.py`). L'allocation par bâtiment des
-`age_*`/`csp_*` (`allocator._allocate_csp_columns`) devient alors **vestigiale** pour
-la *génération*.
+**Décisions verrouillées (session prépa Fable) — NE PAS re-trancher :**
+- **D1 — Option A.** On honore le **nombre de ménages** (`menages_alloues`) et la
+  population suit les **vraies tailles** des ménages tirés. `population_allouee`
+  n'est qu'un indicateur, pas gospel : il **bouge** vs l'allocateur, c'est assumé.
+- **D2 — un seul indicateur de population.** Après tirage, `population_allouee` est
+  **recalculé depuis les agents** (`groupby(home_id).size()`) avant export → une
+  seule vérité de population, cohérente entre `buildings.*` et `agents.*`.
+  `casualties.py` reste juste **sans être modifié** (il lit `population_allouee`).
+- **D3 — âge/CSP par bâtiment : deux jeux.** On **recalcule** `age_*`/`csp_*` par
+  bâtiment depuis les agents (= primaire, vérité) ET on **garde** la version
+  allocateur (`_allocate_csp_columns`) à côté (suffixée) pour **mesurer l'écart**.
+  Impacte légèrement `compare.py`.
+- **D4 — communautés (`Zc_*` EHPAD/foyers) = ménages singletons ordinaires**, tirés
+  comme les autres. Le placement dédié dans les bâtiments `fonction=ehpad` (POI)
+  est un **chantier futur** (débloqué par le POI), pas ici.
+- **D5 — repli si l'IPU échoue** sur un IRIS (trop petit / marges irréalisables) :
+  tirer de vrais ménages du **pool départemental** (poids IPONDI bruts, structure
+  familiale préservée). Dernier recours (zéro donnée RP) : ancien tirage d'individus.
+- **D6 — déterminisme.** Le nb/bâtiment devient **stochastique** (tailles de ménages
+  variables), calé sur `menages_alloues`, reproductible à seed fixé. Assumé — la
+  **convergence multi-runs** des marges est à vérifier (test).
+- **V1** IPU **une fois par IRIS** (pool dép. construit une fois), cibles = marges
+  `age_*`/`csp_*` INSEE de l'IRIS. ~161 IRIS ≈ +1 min. · **V2** tirage **avec remise**
+  dans le **pool entier repondéré**. · **V3** chantier lié au mode **`--source iris`**
+  (`P22_MEN` présent) ; mode Filosofi → ancien `generate_agents` en repli. · **V4**
+  schéma `agents.*` = colonnes actuelles **+** `household_id` (unique par ménage
+  tiré : un ménage cloné dans 2 bâtiments = 2 ids) **+** `role` (LPRM). Âge/CSP
+  viennent du membre réel. · **V5** `activity`/destinations réutilisent
+  `_classify_activity` + `assign_facilities` inchangés ; le lien parent→enfant est
+  **exporté** (household_id+role) pour GAMA, pas modélisé ici.
 
 **Pièges / décisions verrouillées (NE PAS refaire) :**
 - **Communautés `LPRM=Z`** (EHPAD, foyers, internats) : leur `NUMMI` est un
@@ -289,6 +313,22 @@ la *génération*.
 propriétés émergentes que les mocks ratent (0 ménage multi-IRIS, 0 orphelin, taille
 ≈ INSEE, fit IPU médiane < 1 %). **Leçon** : les mocks n'ont attrapé aucun des bugs
 ci-dessus ; valider sur données réelles avant de committer ce chantier.
+
+**Tests-contrat des briques 3-4 (écrits AVANT l'implémentation, test-first).** Ils
+skippent tant que `generate_household_agents` n'existe pas, puis pilotent l'écriture :
+- `tests/test_household_agents.py` — contrat **structurel** sur fixture synthétique
+  (schéma `household_id`/`role`, K1-K14 : 0 orphelin, 0 ménage éclaté, conservation
+  des ménages == `menages_alloues`, éducation adaptée à l'âge, déterminisme du nb de
+  ménages…).
+- `tests/test_households_realdata.py` — **cohérence + correctness** sur vraies données.
+  *Gates certaines* (exactes) : conservation ménages, `population_allouee` recalculé ==
+  `groupby(home_id)` (D2), 0 orphelin. *Gates à seuil* (constantes EMPIRIQUES en tête
+  de fichier, à calibrer au 1er run) : la **gate dure à 0,5 %** porte sur la **forme**
+  des distributions âge/CSP (proportions) — sous l'option A, headcount et marges
+  absolues portent le même décalage d'échelle, seule la forme est pincée par l'IPU ;
+  le headcount brut est empirique (~2 %). Diagnostic runtime attendu :
+  `IRIS_FIT_WARN_THRESHOLD` + un WARNING par IRIS mal calé (l'utilisateur doit savoir
+  quels quartiers sont moins fiables).
 
 ---
 
