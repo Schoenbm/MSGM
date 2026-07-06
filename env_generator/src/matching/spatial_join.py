@@ -1,6 +1,7 @@
 import logging
 
 import geopandas as gpd
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -60,5 +61,22 @@ def join_buildings_to_insee(
 
     # 6. Renommer l'index de jointure en cell_idx (utilisé par l'allocateur)
     joined = joined.rename(columns={"index_right": "cell_idx"})
+
+    # 7. L'IRIS d'allocation fait foi : la population et les marges d'un bâtiment
+    # viennent de sa cellule de jointure, pas de l'attribut code_iris du shapefile
+    # BD TOPO (lacunaire : mesuré 23/552 bâtiments peuplés sans code sur la zone
+    # test, 0 désaccord quand les deux existent). On réécrit `code_iris` depuis la
+    # cellule (str 9 caractères) ; hors grille, l'attribut d'origine est conservé
+    # au même format. Consommé par generate_household_agents (marges par IRIS) et
+    # casualties.py (agrégation).
+    if "CODE_IRIS" in insee.columns:
+        cell_code = joined["cell_idx"].map(insee["CODE_IRIS"].astype(str))
+        if "code_iris" in joined.columns:
+            orig = joined["code_iris"].map(
+                lambda x: str(int(float(x))).zfill(9) if pd.notna(x) else pd.NA
+            )
+        else:
+            orig = pd.Series(pd.NA, index=joined.index, dtype="object")
+        joined["code_iris"] = cell_code.fillna(orig)
 
     return joined

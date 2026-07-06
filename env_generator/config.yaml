@@ -41,7 +41,7 @@ zones:
   population:
     selector:
       type: iris
-      codes: ["381850208","381850209","381850210"]   #  IRIS population a definir (ex Ile Verte)
+      codes: ["381850208","381850209","381850210","380450000", "380570000", "381260000", "381510101", "381510102", "381510103"]   #  IRIS population a definir (ex Ile Verte)
 
 # -- Reseau routier (OSM via osmnx) -----------------------------------------
 network:

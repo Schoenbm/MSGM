@@ -307,9 +307,14 @@ def step_env(verbose: bool = False, config_path: str = "config.yaml", assume_yes
     from src.loaders.bdnb import load_bdnb_building_usage, load_bdnb_building_attrs, employment_ids, load_bdnb_erp
     from src.loaders.buildings import load_all_buildings, prepare_residential, absorb_slivers
     from src.loaders.poi import fetch_osm_pois, match_pois_to_buildings, match_education_to_buildings, merge_fonctions
+    from src.loaders.rp_detail import load_rp_households
     from src.matching.spatial_join import join_buildings_to_insee
     from src.matching.allocator import allocate_population
-    from src.matching.agents import generate_agents
+    from src.matching.agents import (
+        generate_agents,
+        generate_household_agents,
+        update_building_demographics,
+    )
     from src.output.export import merge_buildings, export_buildings, export_env, export_agents
 
     cfg = load_config(config_path)
@@ -425,14 +430,33 @@ def step_env(verbose: bool = False, config_path: str = "config.yaml", assume_yes
     log.info("[7/8] Génération des agents")
     # Lieux de travail récupérés via la BDNB (catégorie "travail").
     workplace_extra_ids = employment_ids(bdnb_usage)
-    agents = generate_agents(
-        result, buildings_all, education=education,
+    agent_kwargs = dict(
+        education=education,
         usages=cfg.workplace_usages,
         decay_m=cfg.workplace_decay_m,
         education_decay_m=cfg.education_decay_m,
         seed=cfg.workplace_seed,
         workplace_extra_ids=workplace_extra_ids,
     )
+    # Chemin principal (chantier ménages, V3) : tirage de MÉNAGES RÉELS (pool RP
+    # détail repondéré par IPU) quand menages_alloues est disponible ; sinon repli
+    # sur le tirage d'individus indépendants (generate_agents).
+    members = None
+    if "menages_alloues" in result.columns:
+        communes = sorted({str(c)[:5] for c in grid["CODE_IRIS"]})
+        try:
+            members = load_rp_households(departement, communes=communes)
+        except Exception as exc:
+            log.warning("Pool RP détail indisponible (%s) — repli sur le tirage "
+                        "d'individus indépendants", exc)
+    if members is not None and not members.empty:
+        # D2 : recalcule population_allouee de `result` EN PLACE depuis les agents.
+        agents = generate_household_agents(result, buildings_all, members, **agent_kwargs)
+        # D3 : marges âge/CSP par bâtiment recalées sur les agents (version
+        # allocateur conservée en *_alloc pour mesurer l'écart).
+        update_building_demographics(result, agents)
+    else:
+        agents = generate_agents(result, buildings_all, **agent_kwargs)
     if not agents.empty:
         agents.to_file(out_dir / "agents.gpkg", driver="GPKG")
 

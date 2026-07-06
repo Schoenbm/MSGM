@@ -185,8 +185,27 @@ def _write_csv(df: pd.DataFrame, path: Path) -> None:
 
 
 def _write_shp(gdf: gpd.GeoDataFrame, path: Path) -> None:
-    # Shapefile column names are limited to 10 characters.
-    rename = {col: _SHP_RENAME.get(col, col[:10]) for col in gdf.columns if col != "geometry"}
+    # Shapefile column names are limited to 10 characters. Les colonnes `*_alloc`
+    # (marges allocateur conservées par D3) collisionneraient avec leur jumelle
+    # une fois tronquées (csp_chomeurs_inactifs → csp_chomeu, idem _alloc) : elles
+    # reçoivent un suffixe court `_a`. Garde-fou final : suffixe numérique si un
+    # doublon subsiste (pyogrio refuse les noms dupliqués).
+    rename: dict[str, str] = {}
+    for col in gdf.columns:
+        if col == "geometry":
+            continue
+        if col.endswith("_alloc"):
+            base = col[: -len("_alloc")]
+            rename[col] = _SHP_RENAME.get(base, base)[:8] + "_a"
+        else:
+            rename[col] = _SHP_RENAME.get(col, col[:10])
+    seen: dict[str, int] = {}
+    for col, short in rename.items():
+        if short in seen:
+            seen[short] += 1
+            rename[col] = f"{short[:9]}{seen[short]}"
+        else:
+            seen[short] = 0
     gdf_shp = gdf.rename(columns=rename)
     gdf_shp.to_file(path, driver="ESRI Shapefile")
     logger.debug("Shapefile écrit : %s", path)

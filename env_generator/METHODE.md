@@ -37,10 +37,13 @@ Pipeline `python -m src.main --step env` (piloté par `config.yaml`), tout en
    [5] ALLOCATION ─────── INSEE ↔ bâtiments (ménages d'abord, plus fort reste)
         │                 → population + CSP + âge par bâtiment
         │
-   [6] AGENTS ─────────── 1 individu / habitant : âge, CSP, activité
-        │                 → destination par gravité (travail/école/collège/lycée/crèche)
+   [6] AGENTS ─────────── MÉNAGES RÉELS (RP détail + IPU par IRIS) : membres
+        │                 instanciés (âge, CSP, rôle → lien parent→enfant),
+        │                 household_id/role ; activité + destination par gravité
+        │                 (repli sans pool RP : tirage d'individus indépendants)
         │
-   [7] EXPORT ─────────── buildings.* (tous + population) · buildings_light.* · agents.*
+   [7] EXPORT ─────────── buildings.* (tous + population recalculée des agents) ·
+                          env.* (contrat simu) · agents.*
 ```
 
 ---
@@ -58,7 +61,7 @@ Pipeline `python -m src.main --step env` (piloté par `config.yaml`), tout en
 | **BPE** (INSEE) | 2024 | `loaders/bpe.py` | Équipements éducatifs géolocalisés (crèche/école/collège/lycée) | Active |
 | **BDNB** (CSTB) | local ~2,5 Go | `loaders/bdnb.py` | Usage (qualifie les Indifférencié) **+ matériaux/période** (`ffo_bat_*`) pour la vulnérabilité (NN D1-D5) | Active (optionnelle) |
 | MOBPRO (INSEE) | 2022 | `loaders/mobpro.py` | Flux domicile-travail commune→commune | **Réservée** (non branchée) |
-| **RP détail — Individus canton-ou-ville** (INSEE) | 2022 | `loaders/rp_detail.py` | **Échantillon de ménages réels** (membres, âge, CSP, rôle) pour la génération sample-based en ménages | **Chantier ménages** (briques 1-2 faites, non branchée) |
+| **RP détail — Individus canton-ou-ville** (INSEE) | 2022 | `loaders/rp_detail.py` | **Échantillon de ménages réels** (membres, âge, CSP, rôle) — génération sample-based en ménages (§ 3.7) | **Active** — chemin principal des agents |
 
 Toutes les sources distantes passent par le **cache unique** (`loaders/cache.py`,
 `ensure_cached` : check local → contrôle d'intégrité → (re)production atomique).
@@ -115,13 +118,53 @@ IRIS si ≥ `SURFACE_MIN_IRIS` (5) bâtiments connus, sinon fallback
   méthode). **Conservation** : Σ population allouée = population INSEE.
 
 ### 3.7 Génération des agents (`matching/agents.py`)
-Microsimulation par **tirage** (PAS un IPF / échantillon type gospl) :
+
+**Chemin principal — ménages réels (`generate_household_agents`, sample-based).**
+Actif dès que `menages_alloues` existe (mode IRIS) et que le pool RP détail est
+chargeable (sinon : repli individus, plus bas).
+1. **Pool** : `load_rp_households` (RP détail 2022, communes de la zone
+   population) → membres de ménages réels (`hh_id`, âge, CSP, rôle `LPRM`).
+   *Hygiène avant tirage* (`_sanitize_pool`) : écarte les rares ménages qui
+   violeraient les invariants (âge inconnu ; ménage sans adulte — mineur seul,
+   internat ; ménage ordinaire sans référent unique). ~0,1 ‰, loggé.
+2. **Calage par IRIS (IPU, `HouseholdReweighter.weights_for`)** : cibles = marges
+   `age_*`/`csp_*` de l'IRIS (sommes des colonnes bâtiment, exactes par
+   construction du plus fort reste) **+ contrainte du nombre de ménages**
+   (`n_households` = Σ `menages_alloues` = P22_MEN ; sans elle le nombre implicite
+   de ménages dérive de +9 à +20 % et la population tirée manque de ~15 % —
+   mesuré, cf. § 5). `n_iter=300`.
+3. **Tirage (option A)** : par bâtiment, exactement `menages_alloues` ménages,
+   **avec remise** dans le pool entier ∝ poids IPU ; les membres réels sont
+   instanciés tels quels (âge, CSP, rôle observés — la table jointe âge×CSP×ménage
+   est **observée**, pas reconstruite). `household_id` unique **par tirage**,
+   `role` = referent/conjoint/enfant/… → **lien parent→enfant exporté** pour le
+   regroupement familial GAMA. Ages > 99 étiquetés `age_80p` en sortie.
+4. **Cohérence aval** : `population_allouee` **recalculé depuis les agents**
+   (`groupby(home_id).size()`, D2 — une seule vérité de population) ; marges
+   `age_*`/`csp_*` par bâtiment recalées sur les agents, version allocateur
+   conservée en `*_alloc` (D3, `update_building_demographics`) pour mesurer
+   l'écart (~50 % de masse redistribuée entre bâtiments à l'intérieur des IRIS —
+   attendu : l'allocateur lissait ∝ NB_LOGTS, les ménages réels concentrent).
+5. **Diagnostics runtime** : WARNING par IRIS dont > `IRIS_FIT_WARN_THRESHOLD`
+   (5 %) de la masse des marges reste mal placée ; repli D5 par IRIS (poids
+   IPONDI bruts, structure familiale préservée) si l'IPU rend des poids dégénérés.
+
+Propriétés : nb de **ménages**/bâtiment déterministe (= `menages_alloues`), la
+**population** suit les vraies tailles (stochastique, reproductible à seed fixé) ;
+validé sur données réelles (`test_households_realdata.py`) : headcount à ~0,5 %
+médian de l'INSEE (max 2,3 % sur 10 seeds), 0 orphelin, conservation exacte.
+
+**Chemin de repli — individus indépendants (`generate_agents`).** Mode Filosofi
+(pas de `menages_alloues`) ou pool RP indisponible. Microsimulation par **tirage**
+(PAS un IPF / échantillon type gospl) :
 - 1 agent par tête de `population_allouee` ;
 - **âge** : multinomiale ∝ `age_*` puis âge entier uniforme dans la tranche ;
   **repli** sur la distribution globale si un bâtiment a 0 dans chaque tranche
   (artefact du plus fort reste marge-par-marge) → évite les "inconnu" ;
-- **CSP** : tirée pour les 18+ ∝ `csp_*` ; `mineur` pour < 18 ;
-- **activité** (destination de jour) :
+- **CSP** : tirée pour les 18+ ∝ `csp_*` ; `mineur` pour < 18 ; pas de ménage
+  (`household_id`/`role` vides).
+
+**Commun aux deux chemins** — **activité** (destination de jour) :
 
   | Âge / statut | activité |
   |---|---|
@@ -167,10 +210,15 @@ crise**) → **crisis_gen** (NN D1-D5, inondation, capacité de refuge selon la 
   crisis_gen), **vulnérabilité** (`mat_mur`, `mat_toit`, `annee_construction` — BDNB
   ffo, pour le NN D1-D5). Consommé par les modules crise ET simulation.
 - **`agents.{gpkg,geojson,csv}`** — 1 ligne = 1 individu : `agent_id`, `home_id`,
-  `age`, `age_band`, `csp`, `activity`, `is_worker`, `dest_id`, `dest_x/y`, `dist_m`,
-  géométrie = point domicile. **Source unique de la population** : le contrat `env`
-  ne porte plus le détail (population/bâtiment = `groupby(home_id)`). Le *nombre*
-  par bâtiment est déterministe (le seed change qui sont les agents, pas combien).
+  **`household_id`**, **`role`** (referent/conjoint/enfant/… — lien parent→enfant
+  pour le regroupement familial), `age`, `age_band`, `csp`, `activity`, `is_worker`,
+  `dest_id`, `dest_x/y`, `dist_m`, géométrie = point domicile. **Source unique de
+  la population** : `population_allouee` de `buildings.*` est recopié depuis
+  `groupby(home_id)` (D2). Le *nombre de ménages* par bâtiment est déterministe
+  (= `menages_alloues`) ; la population suit les tailles réelles des ménages tirés
+  (le seed change qui sont les agents). `buildings.*` porte aussi les marges
+  `age_*`/`csp_*` recalculées des agents + la version allocateur `*_alloc` (D3 ;
+  suffixe `_a` dans le `.shp`, limite 10 caractères).
 
 ---
 
@@ -209,6 +257,26 @@ crise**) → **crisis_gen** (NN D1-D5, inondation, capacité de refuge selon la 
   `residentiel` porte la distinction).
 - **Gravitaire exponentiel**, decay travail 3000 m / éducation 1200 m (non calibrés).
 
+### Session 2026-07 — chantier ménages, briques 3-4
+
+- **Génération en MÉNAGES réels = chemin principal** (`generate_household_agents`),
+  décisions verrouillées D1-D6/V1-V5 appliquées (option A : nb de ménages exact,
+  population émergente ; détail : `claude.md` § « population en ménages »).
+- **Contrainte de nombre de ménages dans l'IPU** (`weights_for(...,
+  n_households=P22_MEN)`, Ye et al. 2009). Mesuré sans elle : Σ poids = +9 à +20 %
+  vs P22_MEN → taille moyenne 1,43-1,50 au lieu de ~1,7 → **population tirée
+  −15,5 %**. Avec elle : headcount ~0,5 % médian (max 2,3 %, 10 seeds, bruit de
+  tirage) ; `n_iter=300` (80 laissaient −0,29 % de biais résiduel).
+- **`code_iris` = IRIS d'allocation** (réécrit par `spatial_join` depuis la cellule
+  de jointure, str 9 car.) : l'attribut du shapefile BD TOPO était lacunaire
+  (23/552 bâtiments peuplés sans code sur la zone test ; 0 désaccord sinon).
+- **Hygiène du pool avant tirage** : ménages sans adulte / sans référent unique /
+  à âge inconnu écartés (~0,1 ‰) — imposé par les invariants « 0 orphelin » et
+  « 1 référent par ménage ».
+- **D3 mesuré** : ~50 % de la masse âge/CSP redistribuée entre bâtiments (à
+  l'intérieur des IRIS, totaux conservés) — l'allocateur lissait ∝ NB_LOGTS, les
+  ménages réels concentrent. Version allocateur gardée en `*_alloc`.
+
 (Historique fin : `git log` du dépôt.)
 
 ## 6. Pistes écartées (avec preuve chiffrée)
@@ -227,39 +295,38 @@ crise**) → **crisis_gen** (NN D1-D5, inondation, capacité de refuge selon la 
 
 ## 7. Hypothèses & limites connues
 
-- Âge et CSP tirés comme **marges indépendantes** (pas de table jointe âge×CSP type
-  IPF/gospl) → marges respectées en espérance, pas exactement. **Sans ménages** :
-  enfants sans parent rattaché. → adressé par le **chantier ménages** (sample-based,
-  briques 1-2 faites ; § 8 et `claude.md`).
+- ~~Âge et CSP tirés comme marges indépendantes, sans ménages~~ — **résolu** par le
+  chantier ménages (§ 3.7 : ménages réels, table jointe observée, lien
+  parent→enfant). Ne subsiste que dans le **chemin de repli** (`generate_agents`,
+  mode Filosofi / pool RP absent). Limites restantes du chemin ménages : pool à la
+  maille canton-ou-ville (un IRIS atypique est approché par repondération, pas par
+  des ménages locaux) ; communautés (EHPAD…) tirées comme singletons dans les
+  logements ordinaires (placement dédié = chantier futur, D4).
 - **Gravitaires non calibrés** (decays au doigt mouillé) — calage MOBPRO réservé.
 - Capacité des équipements éducatifs **uniforme** (donnée BPE absente).
 - 15-17 ans comptés en **mineurs côté CSP** (léger écart avec la pop INSEE « 15+ »).
 - Pas de **fuite hors région** ni de **télétravail** ; tout actif travaille dans la zone.
 - ~23 000 Indifférencié restants laissés tels quels (structures sans contenu).
-- `code_iris` stocké en **float** dans les sorties (commune = `str(int(x)).zfill(9)[:5]`).
+- `code_iris` : réécrit en **str 9 caractères** (IRIS d'allocation) par
+  `spatial_join` sur les bâtiments joints ; reste en **float** sur les couches
+  amont (`buildings_all`) — commune = `str(int(float(x))).zfill(9)[:5]` marche
+  pour les deux.
 - Sur-segmentation BD TOPO : les **slivers** (vitrines/avancées) sont recollés
   (§ 9) ; la **sur-division de grandes parties comparables** est laissée telle
   quelle (pas de fusion sûre sans risquer de coller des bâtiments distincts).
 
 ## 8. Chantiers à venir
 
-0. **Population en ménages (sample-based) — PRIORITAIRE, briques 1-2 faites.**
-   Remplacer le tirage d'**individus indépendants** (§ 3.7, sans ménage ni lien
-   parent→enfant) par des **ménages réels** tirés d'un échantillon INSEE et calés
-   par IRIS. Débloque le **regroupement familial** en évacuation.
-   - **Brique 1 (faite)** `loaders/rp_detail.py` : échantillon de ménages réels
-     (RP détail Individus canton-ou-ville 2022 ; `hh_id`, `role` via `LPRM`, âge,
-     CSP, `IPONDI`).
-   - **Brique 2 (faite)** `matching/households.py` : **IPU** qui repondère le pool
-     sur les marges `age_*`/`csp_*` de chaque IRIS (collapse en types ; validé
-     médiane 0,12 %).
-   - **Brique 3 (à faire)** : par bâtiment, tirer `menages_alloues` ménages ∝ poids
-     IPU de l'IRIS, instancier les membres. **Décision** : honorer le *nombre* de
-     ménages et laisser la population suivre les vraies tailles (option A).
-   - **Brique 4 (à faire)** : refonte `agents.py` (`household_id` + rôle) + câblage.
-   - Détail complet, décisions verrouillées et **pièges à ne pas refaire** (faux
-     ménages de communautés `LPRM=Z`, label `csp_chomeurs_inactifs`=retraités, ne
-     pas clipper les centenaires) : `claude.md` § « population en ménages ».
+0. ~~**Population en ménages (sample-based)**~~ — **FAIT** (briques 1-4, § 3.7).
+   Le tirage d'individus indépendants est remplacé par des **ménages réels**
+   (`generate_household_agents` : RP détail + IPU par IRIS avec contrainte du
+   nombre de ménages + tirage option A), `household_id`/`role` exportés → débloque
+   le **regroupement familial** en évacuation côté GAMA. L'ancien chemin reste en
+   repli (Filosofi / pool RP absent). Validation : `test_household_agents.py`
+   (contrat) + `test_households_realdata.py` (données réelles, seuils calibrés sur
+   10 seeds). Décisions verrouillées, décisions de session et **pièges à ne pas
+   refaire** : `claude.md` § « population en ménages ». **Reste ouvert (futur)** :
+   placement dédié des communautés (EHPAD → bâtiments `fonction=ehpad`, D4).
 1. **Brancher MOBPRO** — caler le gravitaire domicile-travail (affectation 2 étapes :
    tirer la commune de travail via flux MOBPRO, puis bâtiment par gravité). Notes
    détaillées dans `claude.md` (§ Chantier MOBPRO).

@@ -107,6 +107,7 @@ class HouseholdReweighter:
         self,
         age_targets: "dict[str, float] | pd.Series",
         csp_targets: "dict[str, float] | pd.Series",
+        n_households: "float | None" = None,
         n_iter: int = 80,
         tol: float = 1e-4,
     ) -> np.ndarray:
@@ -115,6 +116,15 @@ class HouseholdReweighter:
         Args:
             age_targets: cibles par tranche d'âge (clés de AGE_BANDS).
             csp_targets: cibles par CSP (colonnes csp_*).
+            n_households: cible optionnelle du NOMBRE total de ménages (contrainte
+                de niveau ménage, cf. Ye et al. 2009 — c'est le cas d'usage
+                originel de l'IPU). Sans elle, seules les marges *individus* sont
+                pincées et le nombre de ménages implicite (Σ poids) dérive
+                librement : mesuré +9 à +20 % vs P22_MEN sur la zone Île Verte,
+                d'où une taille moyenne pondérée trop faible et une population
+                tirée à −15 % quand la brique 3 tire `menages_alloues` ménages.
+                Avec la contrainte, Σ poids ≈ n_households et la taille moyenne
+                pondérée ≈ population / ménages. `None` = comportement historique.
             n_iter:      nombre max d'itérations IPU.
             tol:         seuil de convergence (variation relative max d'un facteur).
 
@@ -125,10 +135,16 @@ class HouseholdReweighter:
             [float(age_targets.get(c, 0.0)) for c in AGE_COLS]
             + [float(csp_targets.get(c, 0.0)) for c in CSP_COLS]
         )
+        types = self._types
+        if n_households is not None:
+            # Colonne constante 1 (chaque ménage compte pour 1) : ne scinde aucun
+            # type, la matrice collapse reste valide telle quelle.
+            types = np.hstack([types, np.ones((len(types), 1))])
+            targets = np.append(targets, float(n_households))
         # IPU sur les types (rapide), puis redistribution aux ménages réels : chaque
         # ménage reçoit le poids de son type au prorata de son IPONDI initial dans le
         # type. La somme par type est conservée → marges identiques à l'IPU ménage.
-        type_w = ipu(self._types, targets, self._type_init, n_iter=n_iter, tol=tol)
+        type_w = ipu(types, targets, self._type_init, n_iter=n_iter, tol=tol)
         share = self.init_weight / self._type_init[self._inverse]
         return type_w[self._inverse] * share
 

@@ -8,7 +8,18 @@ d'individus. Chaque agent possède :
     - une CSP            (csp_* pour les 18+, "mineur" pour les moins de 18 ans)
     - une activité + une destination (dest_id) : travail / école / crèche / aucune
 
-Méthode (microsimulation par tirage, PAS un IPF à la Genstar) :
+Deux chemins de génération :
+
+`generate_household_agents` (chemin PRINCIPAL, chantier ménages briques 3-4) —
+tirage de **ménages réels** (sample-based) : par bâtiment, `menages_alloues`
+ménages sont tirés avec remise dans le pool RP détail (`loaders/rp_detail.py`)
+repondéré par IPU sur les marges de l'IRIS (`matching/households.py`), et leurs
+membres réels sont instanciés (âge/CSP/rôle observés). Les agents portent
+`household_id` + `role` (lien parent→enfant exporté pour GAMA). Décisions
+verrouillées D1-D6 / V1-V5 : cf. claude.md § « population en ménages ».
+
+`generate_agents` (REPLI : mode Filosofi sans `menages_alloues`, ou pool RP
+indisponible) — microsimulation par tirage d'individus indépendants (PAS un IPF) :
   1. Pour chaque bâtiment résidentiel, on tire `population_allouee` individus.
   2. L'âge est tiré dans les tranches `age_*` (multinomiale ∝ effectifs), puis un
      âge entier uniforme dans la tranche.
@@ -17,13 +28,15 @@ Méthode (microsimulation par tirage, PAS un IPF à la Genstar) :
   4. Les actifs occupés (CSP ∈ ACTIVE_CSP_COLS) reçoivent un lieu de travail.
 
 ASSOMPTIONS À REVOIR (premier jet) :
-- Âge et CSP sont des marges INSEE *indépendantes* par bâtiment : on les tire
-  séparément, on ne reconstruit pas la table jointe âge×CSP (ce que ferait un IPF
-  / un échantillon comme gospl/Genstar). Les marges sont respectées en espérance,
-  pas exactement (tirage aléatoire).
+- (repli seulement) Âge et CSP sont des marges INSEE *indépendantes* par bâtiment :
+  on les tire séparément, on ne reconstruit pas la table jointe âge×CSP (ce que
+  ferait un IPF / un échantillon comme gospl/Genstar). Les marges sont respectées
+  en espérance, pas exactement (tirage aléatoire). Le chemin ménages n'a pas ce
+  défaut : la table jointe âge×CSP×ménage est OBSERVÉE (ménages réels).
 - Seuil adulte = 18 ans. Les 15-17 ans (comptés dans la pop CSP "15+" INSEE) sont
   donc traités comme mineurs sans CSP — léger écart documenté.
-- Tranche 80+ bornée arbitrairement à [80, 99].
+- Tranche 80+ bornée arbitrairement à [80, 99] (repli) ; les âges réels >99 du
+  RP détail sont étiquetés `age_80p` en sortie (chemin ménages).
 """
 
 import logging
@@ -77,6 +90,12 @@ ACT_COLLEGE = "college"
 ACT_LYCEE = "lycee"
 ACT_TRAVAIL = "travail"
 ACT_AUCUNE = "aucune"     # inactifs, chômeurs, retraités → au domicile
+
+# Diagnostic runtime du calage IPU par IRIS (chemin ménages) : au-delà de cette
+# part de la masse des marges INSEE mal placée après calage
+# (Σ|fitted−target| / Σtarget sur les contraintes de cible > 0), un WARNING est
+# loggé — l'utilisateur sait quels quartiers sont moins fiables.
+IRIS_FIT_WARN_THRESHOLD = 0.05
 
 
 def generate_agents(
@@ -192,7 +211,27 @@ def generate_agents(
         len(agents), agents["age"].mean(), agents["activity"].value_counts().to_dict(),
     )
 
-    # Destinations par activité, chacune sur son propre jeu d'équipements.
+    return _assign_destinations(agents, all_buildings, education, usages,
+                                decay_m, education_decay_m, seed, workplace_extra_ids)
+
+
+def _assign_destinations(
+    agents: gpd.GeoDataFrame,
+    all_buildings: gpd.GeoDataFrame,
+    education: "gpd.GeoDataFrame | None",
+    usages: "tuple[str, ...] | list[str]",
+    decay_m: float,
+    education_decay_m: float,
+    seed: int,
+    workplace_extra_ids: "set[str] | None",
+) -> gpd.GeoDataFrame:
+    """Affecte les destinations par activité, chacune sur son propre jeu d'équipements.
+
+    Partagé entre `generate_agents` et `generate_household_agents` (V5 : le tirage
+    en ménages ne change rien à l'affectation des destinations). Enrichit `agents`
+    des colonnes dest_id, dest_x, dest_y, dist_m.
+    """
+    crs = agents.crs
     agents["dest_id"] = pd.array([pd.NA] * len(agents), dtype="object")
     for col in ("dest_x", "dest_y", "dist_m"):
         agents[col] = np.nan
@@ -221,6 +260,346 @@ def generate_agents(
             agents.loc[sub.index, col] = assigned[col].values
 
     return agents
+
+
+def generate_household_agents(
+    residential: gpd.GeoDataFrame,
+    all_buildings: gpd.GeoDataFrame,
+    members: pd.DataFrame,
+    education: "gpd.GeoDataFrame | None" = None,
+    usages: "tuple[str, ...] | list[str]" = DEFAULT_WORKPLACE_USAGES,
+    decay_m: float = 3000.0,
+    education_decay_m: float = 1200.0,
+    seed: int = 42,
+    workplace_extra_ids: "set[str] | None" = None,
+) -> gpd.GeoDataFrame:
+    """Génère la population en tirant des MÉNAGES RÉELS (sample-based, briques 3-4).
+
+    Par bâtiment résidentiel, tire exactement `menages_alloues` ménages (D1) **avec
+    remise** dans le pool RP détail entier (V2), repondéré par IPU sur les marges
+    `age_*`/`csp_*` de l'IRIS du bâtiment (V1 : un calage par IRIS), puis instancie
+    leurs membres réels (âge, CSP, rôle LPRM observés → lien parent→enfant exporté,
+    V5). La population par bâtiment devient stochastique (vraies tailles de
+    ménages) mais reproductible à seed fixé ; le nombre de ménages, lui, est
+    déterministe (D6).
+
+    Replis (D5) : IRIS aux poids IPU dégénérés → tirage aux poids IPONDI bruts du
+    pool départemental (structure familiale préservée) ; pool RP vide ou
+    `menages_alloues` absent (mode Filosofi) → `generate_agents` (individus
+    indépendants, household_id/role vides).
+
+    ⚠️ Effet de bord voulu (D2) : `residential["population_allouee"]` est RECALCULÉ
+    EN PLACE depuis les agents (`groupby(home_id).size()`) — une seule vérité de
+    population, buildings.* et agents.* d'accord. Les colonnes `menages_alloues` et
+    `age_*`/`csp_*` ne sont pas touchées (pour D3, cf. update_building_demographics).
+
+    Args:
+        residential: bâtiments résidentiels avec `menages_alloues`, `code_iris`,
+                     `age_*`/`csp_*` (sortie de allocate_population --source iris),
+                     Lambert-93, colonne `ID`. Modifié en place (D2, cf. ci-dessus).
+        all_buildings: tous les bâtiments (lieux de travail), cf. generate_agents.
+        members:     pool de membres de ménages réels (sortie de
+                     loaders.rp_detail.load_rp_households).
+        education:   équipements éducatifs BPE (cf. generate_agents).
+        usages:      valeurs USAGE retenues comme lieux de travail.
+        decay_m:     échelle de décroissance distance pour le travail (m).
+        education_decay_m: idem pour école/crèche.
+        seed:        graine du tirage (reproductibilité).
+        workplace_extra_ids: ID BD TOPO d'emploi récupérés via la BDNB.
+
+    Returns:
+        GeoDataFrame, une ligne par agent. Colonnes de generate_agents +
+        `household_id` (int, unique PAR TIRAGE : un ménage du pool tiré deux fois
+        donne deux ids, V4) + `role` (referent/conjoint/enfant/…, LPRM).
+    """
+    # Import local : households.py importe AGE_BANDS/ALL_CSP_COLS de ce module —
+    # un import module-level serait circulaire.
+    from src.matching.households import AGE_COLS, CSP_COLS, HouseholdReweighter
+
+    if members is None or len(members) == 0:
+        return _fallback_individual(residential, all_buildings, education, usages,
+                                    decay_m, education_decay_m, seed,
+                                    workplace_extra_ids, "pool RP vide")
+    if "menages_alloues" not in residential.columns:
+        return _fallback_individual(residential, all_buildings, education, usages,
+                                    decay_m, education_decay_m, seed,
+                                    workplace_extra_ids,
+                                    "menages_alloues absent (mode Filosofi ?)")
+
+    pool = _sanitize_pool(members)
+    if pool.empty:
+        return _fallback_individual(residential, all_buildings, education, usages,
+                                    decay_m, education_decay_m, seed,
+                                    workplace_extra_ids, "pool RP vide après garde-fous")
+
+    crs = residential.crs
+    res = residential.loc[residential["menages_alloues"].fillna(0) > 0].copy()
+    if res.empty:
+        logger.warning("Aucun bâtiment avec menages_alloues > 0 — population vide")
+        residential["population_allouee"] = 0  # D2 : la vérité vient des agents
+        return _empty_household_agents(crs)
+    res["_iris"] = res["code_iris"].map(_iris_code)
+
+    # Marges IRIS = somme des colonnes bâtiment (l'allocateur conserve exactement
+    # les totaux IRIS par plus fort reste → le groupby reconstitue la base-ic).
+    age_cols = [c for c in AGE_COLS if c in res.columns]
+    csp_cols = [c for c in CSP_COLS if c in res.columns]
+    targets = res.groupby("_iris")[age_cols + csp_cols].sum()
+
+    reweighter = HouseholdReweighter(pool)
+    # Bornes des membres de chaque ménage dans le pool trié par hh_id (contigu).
+    # factorize(sort=True) suit le même ordre que reweighter.hh_ids (sorted unique).
+    codes, uniques = pd.factorize(pool["hh_id"], sort=True)
+    if not np.array_equal(np.asarray(uniques), reweighter.hh_ids):
+        raise RuntimeError("Pool de ménages désaligné avec le reweighter (ordre hh_id)")
+    hh_sizes = np.bincount(codes)
+    hh_starts = np.concatenate(([0], np.cumsum(hh_sizes)[:-1]))
+    m_age = pool["age"].to_numpy(dtype=int)
+    m_csp = pool["csp"].to_numpy(dtype=object)
+    m_role = pool["role"].to_numpy(dtype=object)
+
+    centroids = res.geometry.centroid
+    res_x = centroids.x.to_numpy()
+    res_y = centroids.y.to_numpy()
+    res_ids = res["ID"].to_numpy()
+    res_n = res["menages_alloues"].round().astype(int).to_numpy()
+    res_iris = res["_iris"].to_numpy()
+
+    rng = np.random.default_rng(seed)
+    p_rows: list[np.ndarray] = []      # index des lignes membres dans le pool
+    p_home: list[np.ndarray] = []
+    p_hh: list[np.ndarray] = []
+    p_x: list[np.ndarray] = []
+    p_y: list[np.ndarray] = []
+    hh_counter = 0
+    n_iris_warned = 0
+
+    for iris_code in targets.index:  # ordre trié (groupby) → déterministe
+        mask = res_iris == iris_code
+        n_per_building = res_n[mask]
+        total = int(n_per_building.sum())
+        if total == 0:
+            continue
+
+        w = _iris_weights(reweighter, targets.loc[iris_code, age_cols],
+                          targets.loc[iris_code, csp_cols], total, iris_code)
+        if w is None:
+            n_iris_warned += 1
+            w = np.where(np.isfinite(reweighter.init_weight), reweighter.init_weight, 0.0)
+            if w.sum() <= 0:
+                w = np.ones(len(reweighter.hh_ids))
+
+        drawn = rng.choice(len(reweighter.hh_ids), size=total, p=w / w.sum())
+        sizes = hh_sizes[drawn]
+        n_members = int(sizes.sum())
+        # Lignes membres du pool pour chaque ménage tiré (blocs contigus).
+        offsets = np.arange(n_members) - np.repeat(np.cumsum(sizes) - sizes, sizes)
+        p_rows.append(np.repeat(hh_starts[drawn], sizes) + offsets)
+        p_home.append(np.repeat(np.repeat(res_ids[mask], n_per_building), sizes))
+        p_x.append(np.repeat(np.repeat(res_x[mask], n_per_building), sizes))
+        p_y.append(np.repeat(np.repeat(res_y[mask], n_per_building), sizes))
+        # household_id unique PAR TIRAGE (V4) : compteur global, jamais réutilisé.
+        p_hh.append(np.repeat(hh_counter + np.arange(total), sizes))
+        hh_counter += total
+
+    if not p_rows:
+        residential["population_allouee"] = 0  # D2
+        return _empty_household_agents(crs)
+
+    rows = np.concatenate(p_rows)
+    ages = m_age[rows]
+    agents = gpd.GeoDataFrame(
+        {
+            "agent_id": np.arange(len(rows)),
+            "home_id": np.concatenate(p_home),
+            "household_id": np.concatenate(p_hh),
+            "role": m_role[rows],
+            "age": ages,
+            "age_band": _bands_from_ages(ages),
+            "csp": m_csp[rows],
+        },
+        geometry=gpd.points_from_xy(np.concatenate(p_x), np.concatenate(p_y)),
+        crs=crs,
+    )
+    agents["activity"] = _classify_activity(agents)
+    agents["is_worker"] = agents["activity"] == ACT_TRAVAIL
+
+    logger.info(
+        "Agents (ménages réels) : %d individus dans %d ménages (taille moyenne %.2f)"
+        "  |  âge moyen %.1f  |  activités : %s",
+        len(agents), hh_counter, len(agents) / hh_counter,
+        agents["age"].mean(), agents["activity"].value_counts().to_dict(),
+    )
+    if n_iris_warned:
+        logger.warning("%d IRIS tirés en repli départemental (poids IPONDI bruts, D5)",
+                       n_iris_warned)
+
+    agents = _assign_destinations(agents, all_buildings, education, usages,
+                                  decay_m, education_decay_m, seed, workplace_extra_ids)
+
+    # D2 : une seule vérité de population — population_allouee recalculé EN PLACE
+    # depuis les agents. casualties.py (lecteur de population_allouee) reste juste.
+    old_total = (int(residential["population_allouee"].fillna(0).sum())
+                 if "population_allouee" in residential.columns else 0)
+    counts = agents.groupby("home_id").size()
+    residential["population_allouee"] = residential["ID"].map(counts).fillna(0).astype(int)
+    new_total = int(residential["population_allouee"].sum())
+    # NB : pas de '→' (U+2192) dans les logs — console Windows cp1252.
+    logger.info(
+        "D2 : population_allouee recalculée depuis les agents : %d -> %d (%+.2f %%)",
+        old_total, new_total,
+        100.0 * (new_total - old_total) / old_total if old_total else 0.0,
+    )
+    return agents
+
+
+def update_building_demographics(result: gpd.GeoDataFrame, agents: gpd.GeoDataFrame) -> None:
+    """D3 : recale les colonnes `age_*`/`csp_*` par bâtiment sur les AGENTS générés.
+
+    Les agents sont la vérité primaire ; la version allocateur (plus fort reste,
+    marges indépendantes) est CONSERVÉE suffixée `_alloc` pour mesurer l'écart.
+    Modifie `result` en place ; idempotent (les `_alloc` ne sont copiées qu'à la
+    première application). À appeler après `generate_household_agents`, avant export.
+    """
+    age_cols = [c for c in AGE_BANDS if c in result.columns]
+    csp_cols = [c for c in ALL_CSP_COLS if c in result.columns]
+    if not age_cols and not csp_cols:
+        return
+    for col in age_cols + csp_cols:
+        if f"{col}_alloc" not in result.columns:
+            result[f"{col}_alloc"] = result[col]
+
+    empty = pd.DataFrame()
+    age_ct = pd.crosstab(agents["home_id"], agents["age_band"]) if len(agents) else empty
+    # Le crosstab CSP contient une colonne "mineur" (hors csp_*) — ignorée d'office.
+    csp_ct = pd.crosstab(agents["home_id"], agents["csp"]) if len(agents) else empty
+
+    def _recount(ct: pd.DataFrame, col: str) -> pd.Series:
+        if col in ct.columns:
+            return result["ID"].map(ct[col]).fillna(0).astype(int)
+        return pd.Series(0, index=result.index, dtype=int)
+
+    for col in age_cols:
+        result[col] = _recount(age_ct, col)
+    for col in csp_cols:
+        result[col] = _recount(csp_ct, col)
+
+    for label, cols in (("âge", age_cols), ("CSP", csp_cols)):
+        alloc_sum = float(sum(result[f"{c}_alloc"].sum() for c in cols)) if cols else 0.0
+        if alloc_sum > 0:
+            gap = sum(float((result[c] - result[f"{c}_alloc"]).abs().sum()) for c in cols)
+            logger.info(
+                "D3 : marges %s par bâtiment recalculées depuis les agents — écart "
+                "vs allocateur : %.1f %% de la masse (colonnes *_alloc conservées)",
+                label, 100.0 * gap / alloc_sum,
+            )
+
+
+def _iris_weights(reweighter, age_targets: pd.Series, csp_targets: pd.Series,
+                  n_households: int, iris_code: str) -> "np.ndarray | None":
+    """Poids IPU du pool pour un IRIS ; None si dégénérés (→ repli D5 chez l'appelant).
+
+    Le calage inclut la contrainte de NOMBRE de ménages (`n_households` = Σ
+    menages_alloues de l'IRIS = P22_MEN) : sans elle, l'IPU marges-individus
+    laisse dériver le nombre implicite de ménages (+9 à +20 % mesurés) et le
+    tirage de `menages_alloues` ménages sous-peuple l'IRIS d'autant (−15 %).
+    Logge un WARNING (diagnostic runtime) quand le calage laisse plus de
+    IRIS_FIT_WARN_THRESHOLD de la masse des marges individus mal placée."""
+    from src.matching.households import AGE_COLS, CSP_COLS  # cf. import local plus haut
+
+    # n_iter=300 : avec la contrainte ménages (19 contraintes), 80 itérations
+    # laissent un biais résiduel (−0,29 % de population attendue mesuré sur la
+    # zone test) ; 300 le ramènent à −0,08 %. Coût : ~ms par IRIS (IPU par types).
+    w = reweighter.weights_for(age_targets, csp_targets, n_households=n_households,
+                               n_iter=300)
+    if not np.all(np.isfinite(w)) or float(w.sum()) <= 0.0:
+        logger.warning("IRIS %s : IPU inutilisable (poids dégénérés) — tirage en "
+                       "repli départemental, poids IPONDI bruts (D5)", iris_code)
+        return None
+
+    tvec = np.array([float(age_targets.get(c, 0.0)) for c in AGE_COLS]
+                    + [float(csp_targets.get(c, 0.0)) for c in CSP_COLS])
+    keep = tvec > 0
+    if keep.any():
+        fitted = w @ reweighter.A
+        misfit = float(np.abs(fitted[keep] - tvec[keep]).sum() / tvec[keep].sum())
+        if misfit > IRIS_FIT_WARN_THRESHOLD:
+            logger.warning(
+                "IRIS %s : calage IPU imparfait — %.1f %% de la masse des marges mal "
+                "placée (seuil %.0f %%) ; quartier moins fiable",
+                iris_code, 100.0 * misfit, 100.0 * IRIS_FIT_WARN_THRESHOLD,
+            )
+    return w
+
+
+def _sanitize_pool(members: pd.DataFrame) -> pd.DataFrame:
+    """Garde-fous d'intégrité du pool avant tirage (invariants K1/K6/K9 des tests).
+
+    Écarte les rares ménages du RP détail qui violeraient les invariants de la
+    population générée (volumes ~0,1 ‰, loggés ; les marges IRIS — base-ic —
+    ne bougent pas) :
+      - membre d'âge inconnu (AGED manquant → -1 au chargement) ;
+      - ménage sans adulte (mineur seul en logement, ou singleton de communauté
+        type internat) : le tirer produirait un « enfant orphelin » ;
+      - ménage ordinaire sans référent unique (29 cas mesurés sur l'Isère).
+    Retourne le pool trié par hh_id (blocs membres contigus pour le tirage)."""
+    m = members
+    by_hh = m.groupby("hh_id", sort=False)
+    ok_age = by_hh["age"].min() >= 0
+    has_adult = by_hh["age"].max() >= ADULT_MIN_AGE
+    is_collective = by_hh["role"].first() == "hors_menage"  # singletons Zc_*
+    one_ref = m["role"].eq("referent").groupby(m["hh_id"], sort=False).sum() == 1
+    ok = ok_age & has_adult & (is_collective | one_ref)
+
+    n_drop = int((~ok).sum())
+    if n_drop:
+        logger.info(
+            "Pool ménages : %d ménage(s) écarté(s) avant tirage (âge inconnu %d, "
+            "sans adulte %d, référent non unique %d)",
+            n_drop, int((~ok_age).sum()), int((ok_age & ~has_adult).sum()),
+            int((ok_age & has_adult & ~(is_collective | one_ref)).sum()),
+        )
+    kept = m.loc[m["hh_id"].map(ok)]
+    return kept.sort_values("hh_id", kind="stable").reset_index(drop=True)
+
+
+def _fallback_individual(residential, all_buildings, education, usages, decay_m,
+                         education_decay_m, seed, workplace_extra_ids,
+                         reason: str) -> gpd.GeoDataFrame:
+    """Dernier recours (D5/V3) : ancien tirage d'individus, schéma ménages conservé."""
+    logger.warning("Tirage en ménages impossible (%s) — repli sur le tirage "
+                   "d'individus indépendants (generate_agents)", reason)
+    agents = generate_agents(residential, all_buildings, education=education,
+                             usages=usages, decay_m=decay_m,
+                             education_decay_m=education_decay_m, seed=seed,
+                             workplace_extra_ids=workplace_extra_ids)
+    agents["household_id"] = pd.array([pd.NA] * len(agents), dtype="object")
+    agents["role"] = pd.array([pd.NA] * len(agents), dtype="object")
+    return agents
+
+
+def _iris_code(x) -> str:
+    """Code IRIS 9 caractères depuis `code_iris` (float en sortie d'allocation)."""
+    return str(int(float(x))).zfill(9)
+
+
+def _bands_from_ages(ages: np.ndarray) -> np.ndarray:
+    """Tranche INSEE de chaque âge (sortie agents). Les >99 (centenaires, hors
+    tranches base-ic) sont étiquetés `age_80p` EN SORTIE seulement — l'IPU garde
+    ses tranches strictes (piège « ne pas clipper », cf. households.py)."""
+    bands = np.full(len(ages), "age_80p", dtype=object)
+    for name, (lo, hi) in AGE_BANDS.items():
+        bands[(ages >= lo) & (ages <= hi)] = name
+    return bands
+
+
+def _empty_household_agents(crs) -> gpd.GeoDataFrame:
+    return gpd.GeoDataFrame(
+        columns=["agent_id", "home_id", "household_id", "role", "age", "age_band",
+                 "csp", "activity", "is_worker", "dest_id", "dest_x", "dest_y",
+                 "dist_m", "geometry"],
+        geometry="geometry", crs=crs,
+    )
 
 
 def _classify_activity(agents: gpd.GeoDataFrame) -> "np.ndarray":
