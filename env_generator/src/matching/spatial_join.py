@@ -33,7 +33,11 @@ def join_buildings_to_insee(
     # 3. Jointure spatiale : centroïde dans carreau
     demo_cols = [c for c in insee.columns if c.startswith("csp_") or c.startswith("age_")]
     insee_cols = ["Ind_total", "geometry"] + demo_cols
-    for col in ("P22_MEN", "taille_moy_menage"):
+    # Colonnes de cellule forwardées telles quelles (PAS allouées par bâtiment) :
+    # ménages + composition des ménages (men_* = HH_TYPE_COLS de households.py,
+    # cibles IPU de niveau ménage lues par IRIS dans generate_household_agents).
+    for col in ("P22_MEN", "taille_moy_menage", "men_seul", "men_sans_fam",
+                "men_couple_senf", "men_couple_aenf", "men_mono"):
         if col in insee.columns:
             insee_cols.append(col)
 

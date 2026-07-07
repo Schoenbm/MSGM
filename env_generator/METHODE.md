@@ -62,6 +62,7 @@ Pipeline `python -m src.main --step env` (piloté par `config.yaml`), tout en
 | **BDNB** (CSTB) | local ~2,5 Go | `loaders/bdnb.py` | Usage (qualifie les Indifférencié) **+ matériaux/période** (`ffo_bat_*`) pour la vulnérabilité (NN D1-D5) | Active (optionnelle) |
 | MOBPRO (INSEE) | 2022 | `loaders/mobpro.py` | Flux domicile-travail commune→commune | **Réservée** (non branchée) |
 | **RP détail — Individus canton-ou-ville** (INSEE) | 2022 | `loaders/rp_detail.py` | **Échantillon de ménages réels** (membres, âge, CSP, rôle) — génération sample-based en ménages (§ 3.7) | **Active** — chemin principal des agents |
+| **RP base-ic couples-familles-ménages** (INSEE) | 2022 | `loaders/iris.py` | **Composition des ménages par IRIS** (`C22_MEN*` → `men_*`) : contraintes ménage de l'IPU (distribution des tailles, § 3.7) | **Active** (optionnelle — repli nombre seul) |
 
 Toutes les sources distantes passent par le **cache unique** (`loaders/cache.py`,
 `ensure_cached` : check local → contrôle d'intégrité → (re)production atomique).
@@ -125,14 +126,24 @@ chargeable (sinon : repli individus, plus bas).
 1. **Pool** : `load_rp_households` (RP détail 2022, communes de la zone
    population) → membres de ménages réels (`hh_id`, âge, CSP, rôle `LPRM`).
    *Hygiène avant tirage* (`_sanitize_pool`) : écarte les rares ménages qui
-   violeraient les invariants (âge inconnu ; ménage sans adulte — mineur seul,
-   internat ; ménage ordinaire sans référent unique). ~0,1 ‰, loggé.
-2. **Calage par IRIS (IPU, `HouseholdReweighter.weights_for`)** : cibles = marges
-   `age_*`/`csp_*` de l'IRIS (sommes des colonnes bâtiment, exactes par
-   construction du plus fort reste) **+ contrainte du nombre de ménages**
-   (`n_households` = Σ `menages_alloues` = P22_MEN ; sans elle le nombre implicite
-   de ménages dérive de +9 à +20 % et la population tirée manque de ~15 % —
-   mesuré, cf. § 5). `n_iter=300`.
+   violeraient les invariants ou dégénéreraient le calage (âge inconnu ; membre
+   **> 99 ans** — hors de toute contrainte d'âge, direction que l'IPU exploite
+   pour gonfler les tailles « gratuitement », mesuré +9,2 % ; ménage sans adulte —
+   mineur seul, internat ; ménage ordinaire sans référent unique). ~0,1 ‰, loggé.
+2. **Calage par IRIS (IPU ménage×individu, `HouseholdReweighter.weights_for`)** —
+   la forme complète de Ye et al. 2009 :
+   - marges *individus* `age_*`/`csp_*` de l'IRIS (sommes des colonnes bâtiment,
+     exactes par construction du plus fort reste) ;
+   - marges *ménages* : **composition** (`men_*` ← base-ic couples-familles-
+     ménages `C22_MEN*`, classification du pool par rôles LPRM via
+     `household_types`), rescalées à Σ = `menages_alloues` (= P22_MEN) — elles
+     pincent le nombre ET la distribution des tailles de ménage. Sans données de
+     composition : repli sur la contrainte du seul nombre (`n_households`) ;
+   - **tilt final de taille moyenne** (`w′ = w·exp(θ·taille)`, θ par bisection) :
+     E[taille pondérée] = P22_POP/P22_MEN exactement, même quand les cibles INSEE
+     se contredisent (C22 vs P22, âge vs composition) — la population et le
+     nombre de ménages priment, la forme d'âge encaisse l'écart résiduel là où
+     les données sont incohérentes (WARNING par IRIS). `n_iter=300`.
 3. **Tirage (option A)** : par bâtiment, exactement `menages_alloues` ménages,
    **avec remise** dans le pool entier ∝ poids IPU ; les membres réels sont
    instanciés tels quels (âge, CSP, rôle observés — la table jointe âge×CSP×ménage
@@ -267,6 +278,17 @@ crise**) → **crisis_gen** (NN D1-D5, inondation, capacité de refuge selon la 
   vs P22_MEN → taille moyenne 1,43-1,50 au lieu de ~1,7 → **population tirée
   −15,5 %**. Avec elle : headcount ~0,5 % médian (max 2,3 %, 10 seeds, bruit de
   tirage) ; `n_iter=300` (80 laissaient −0,29 % de biais résiduel).
+- **Itération 2 — le nombre ne suffit pas, il faut la TAILLE.** Mesuré (zone
+  9 IRIS) : avec le seul nombre contraint, la repondération sur l'âge déforme la
+  distribution des tailles — taille moyenne +5,4 % zone (population +4,3 %),
+  **+31 % sur un IRIS** ; un contrôle zone-globale masquait ces compensations
+  (leçon : tester PAR IRIS). Fix en trois pièces (cf. § 3.7 et `claude.md`) :
+  **composition des ménages dans l'IPU** (C22_MEN* par IRIS — la taille 1/2/3/4/5+
+  n'existe pas à l'IRIS, vérifié), **hygiène >99 ans** (direction dégénérée),
+  **tilt final de taille moyenne** (les cibles INSEE peuvent être mutuellement
+  incohérentes : C22_MEN jusqu'à +38 % de P22_MEN — aucun ordre de contraintes ne
+  s'en sort, mesuré ; le tilt garantit taille et population, la forme d'âge
+  encaisse localement, TV ≤ 0,16 sur l'IRIS le plus incohérent, ~0 ailleurs).
 - **`code_iris` = IRIS d'allocation** (réécrit par `spatial_join` depuis la cellule
   de jointure, str 9 car.) : l'attribut du shapefile BD TOPO était lacunaire
   (23/552 bâtiments peuplés sans code sur la zone test ; 0 désaccord sinon).
@@ -301,7 +323,11 @@ crise**) → **crisis_gen** (NN D1-D5, inondation, capacité de refuge selon la 
   mode Filosofi / pool RP absent). Limites restantes du chemin ménages : pool à la
   maille canton-ou-ville (un IRIS atypique est approché par repondération, pas par
   des ménages locaux) ; communautés (EHPAD…) tirées comme singletons dans les
-  logements ordinaires (placement dédié = chantier futur, D4).
+  logements ordinaires (placement dédié = chantier futur, D4) ; sur les IRIS où
+  les sources INSEE se contredisent (C22 vs P22, mesuré jusqu'à +38 % sur le
+  nombre de ménages d'un petit IRIS), la **forme d'âge locale** encaisse l'écart
+  (le tilt privilégie population + nombre de ménages) — signalé par le WARNING
+  par IRIS ; les **centenaires** (>99 ans) sont absents des agents (~0,01 %).
 - **Gravitaires non calibrés** (decays au doigt mouillé) — calage MOBPRO réservé.
 - Capacité des équipements éducatifs **uniforme** (donnée BPE absente).
 - 15-17 ans comptés en **mineurs côté CSP** (léger écart avec la pop INSEE « 15+ »).

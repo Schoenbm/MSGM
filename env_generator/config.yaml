@@ -24,6 +24,8 @@ datasets:
   contours_iris_url: "https://data.geopf.fr/telechargement/download/CONTOURS-IRIS/CONTOURS-IRIS_3-0__SHP_LAMB93_FXX_2024-01-01/CONTOURS-IRIS_3-0__SHP_LAMB93_FXX_2024-01-01.7z"
   insee_pop_url: "https://www.insee.fr/fr/statistiques/fichier/8647014/base-ic-evol-struct-pop-2022_csv.zip"
   insee_logement_url: "https://www.insee.fr/fr/statistiques/fichier/8647012/base-ic-logement-2022_csv.zip"
+  # Composition des menages (C22_MEN*) : contraintes de taille de menage de l'IPU
+  insee_familles_url: "https://www.insee.fr/fr/statistiques/fichier/8647008/base-ic-couples-familles-menages-2022_csv.zip"
 
 # -- Zones ------------------------------------------------------------------
 # region     : terrain d'etude complet = toute la metropole (161 IRIS). C'est

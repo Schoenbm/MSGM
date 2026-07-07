@@ -48,14 +48,14 @@ env_generator/
 │   │   ├── allocator.py         # allocation pop/ménages + âge/CSP (plus fort reste)
 │   │   ├── agents.py            # génère les agents : MÉNAGES réels (principal) ou individus (repli)
 │   │   ├── workplaces.py        # affectation gravitaire d'un lieu de travail aux actifs
-│   │   └── households.py        # reweighting IPU du pool de ménages sur marges IRIS + contrainte nb ménages
+│   │   └── households.py        # IPU ménage×individu : marges IRIS + composition ménages + tilt taille
 │   ├── output/
 │   │   ├── export.py            # merge_buildings + export_buildings (complète) ; build_env_layer/export_env (contrat env) ; export_agents
 │   │   ├── visualize.py         # carte
 │   │   ├── compare.py / compare_grid.py  # validation vs recensement
 │   │   └── casualties.py        # victimes/sans-abris depuis dommages D1..D5
 │   └── utils/logging_config.py
-└── tests/                       # pytest (~397 tests ; test_*realdata.py skippés si cache/données absents)
+└── tests/                       # pytest (~398 tests ; test_*realdata.py skippés si cache/données absents)
 ```
 
 > ⚠️ `loaders/osm.py` concerne les **bâtiments** (tags flats/levels), PAS le
@@ -83,8 +83,11 @@ erreur).
 ligne = un individu, avec domicile, âge, CSP, une **activité** et une destination.
 
 `generate_household_agents` (chemin **PRINCIPAL** — chantier ménages, cf. section
-dédiée) : tire des **ménages réels** du RP détail, repondérés par IPU sur les
-marges de chaque IRIS (+ contrainte du **nombre** de ménages), et instancie leurs
+dédiée) : tire des **ménages réels** du RP détail, repondérés par IPU
+**ménage×individu** sur les marges de chaque IRIS — âge/CSP (individus) **+
+composition des ménages** (`C22_MEN*`, pince la distribution des tailles, Ye et
+al. 2009) **+ tilt final de taille moyenne** (garantit population/ménages même
+quand les cibles INSEE sont incohérentes entre elles) — et instancie leurs
 membres (âge/CSP/rôle observés → `household_id` + `role`, lien parent→enfant).
 `step_env` l'utilise dès que le pool RP est chargeable et que `menages_alloues`
 existe (mode `--source iris`) ; il applique **D2** (recalcul `population_allouee`
@@ -206,6 +209,7 @@ branché** : réservé au calage futur des `decay_m` (gravitaire non calibré).
 | **BDNB** (CSTB) | local (~2,5 Go) | `loaders/bdnb.py` | `usage_principal_bdnb_open` → catégorie (travail / résidentiel / annexe) : **qualifie les « Indifférencié »** BD TOPO. Ajoute des lieux de travail ET affine le filtre résidentiel. Annote `usage_bdnb`. **Aussi : matériaux/période** (`ffo_bat_*`, `load_bdnb_building_attrs`) → contrat `env` pour la vulnérabilité (NN D1-D5). | **Active** (optionnelle) | https://bdnb.io |
 | **MOBPRO** (INSEE) | 2022 | `loaders/mobpro.py` | Flux domicile-travail commune→commune. | **Réservée** — calage futur, non branchée | https://www.insee.fr/fr/statistiques/8582949 |
 | **RP détail — Individus canton-ou-ville** (INSEE) | 2022 | `loaders/rp_detail.py` | **Échantillon de ménages réels** (membres + âge + CSP + rôle `LPRM`) pour la génération sample-based en ménages (`generate_household_agents`). Zone E (contient l'Isère). | **Active** — chemin principal des agents en `--source iris` | https://www.insee.fr/fr/statistiques/8647104 |
+| **RP base-ic — couples-familles-ménages** (INSEE) | 2022 | `loaders/iris.py` | **Composition des ménages par IRIS** (`C22_MENPSEUL/SFAM/COUPSENF/COUPAENF/FAMMONO` → `men_*`) : contraintes de niveau ménage de l'IPU (pince la distribution des tailles). Optionnelle : sans elle, repli sur la contrainte du seul nombre. | **Active** | https://www.insee.fr/fr/statistiques/8647008 |
 
 > Toutes les sources distantes passent par le **pipeline de cache unique**
 > (`loaders/cache.py`, `ensure_cached`). Millésimes couplés au code (RP/MOBPRO 2022,
@@ -272,10 +276,13 @@ d'une table jointe. Source : fichier détail **Individus canton-ou-ville RP 2022
   `role` (depuis `LPRM` : référent/conjoint/enfant → **lien parent→enfant**), `age`,
   `csp` (alignée sur les `csp_*` d'`iris.py`), `iris`, `weight` (`IPONDI`).
 - **Brique 2 (faite)** `matching/households.py` — `HouseholdReweighter(members)` +
-  `weights_for(age_targets, csp_targets, n_households=None)` : IPU qui repondère le
-  pool (collapse en ~9k types → ~400 ms/IRIS) pour caler les marges IRIS. Validé
-  région : erreur médiane 0,12 %. Étendue en session briques 3-4 d'une **contrainte
-  optionnelle de nombre de ménages** (cf. décisions de session ci-dessous).
+  `weights_for(age_targets, csp_targets, hh_type_targets=None, n_households=None,
+  mean_size_target=None)` : IPU **ménage×individu** (Ye et al. 2009) qui repondère
+  le pool (collapse en types âge×CSP×composition → ~ms/IRIS) pour caler les marges
+  IRIS. Validé région : erreur médiane 0,12 % (marges individus seules). Étendue en
+  sessions briques 3-4 : contrainte de nombre de ménages, puis **contraintes de
+  COMPOSITION** (`HH_TYPE_COLS`, `household_types()`) et **tilt final de taille
+  moyenne** (`_mean_size_tilt`) — cf. décisions de session ci-dessous.
 - **Brique 3 (faite)** `matching/agents.py::generate_household_agents(residential,
   all_buildings, members, education=None, …, seed=42)` — par IRIS : IPU (V1), puis
   par bâtiment tirage de `menages_alloues` ménages **avec remise** (V2, D1) dans le
@@ -316,6 +323,38 @@ d'une table jointe. Source : fichier détail **Individus canton-ou-ville RP 2022
 - **Export `.shp`** : les colonnes `*_alloc` (D3) collisionnaient avec leurs
   jumelles après troncature à 10 caractères → suffixe `_a` + garde-fou d'unicité
   dans `_write_shp`.
+
+**Décisions prises EN SESSION — itération 2 (biais de taille de ménage) — à valider :**
+- **Constat (mesuré, zone 9 IRIS)** : la contrainte du seul *nombre* de ménages
+  corrige le compte mais pas la TAILLE — repondérer sur l'âge déforme la
+  distribution des tailles : +5,4 % de taille moyenne zone (+4,3 % de population),
+  jusqu'à **+31 % par IRIS** (381510102). Un test zone-globale masquait ces
+  compensations → nouveau garde-fou PAR IRIS (`test_mean_household_size_per_iris`).
+- **Contraintes de COMPOSITION des ménages dans l'IPU** (la forme complète de Ye
+  et al. 2009, ménage×individu). Source : base-ic **couples-familles-ménages 2022**
+  (`C22_MENPSEUL/SFAM/COUPSENF/COUPAENF/FAMMONO` — la taille 1/2/3/4/5+ n'existe
+  PAS à l'IRIS, vérifié sur le fichier). Chargées par `iris.py` (`men_*`, cache
+  unique, millésime couplé), forwardées par `spatial_join`, classification du pool
+  par rôles LPRM (`household_types` : seule/couple±enfants/mono/sans-famille ;
+  validé : parts pondérées à 1-3 points des parts INSEE communales). Cibles
+  **rescalées à Σ = menages_alloues** (= P22_MEN ; le niveau C22, exploitation
+  complémentaire, diverge jusqu'à +38 % de P22_MEN sur un petit IRIS — on garde
+  les proportions C22 au niveau P22). Zc_* comptés en « personne seule » (D4).
+- **Hygiène du pool étendue aux >99 ans** : les membres hors tranches d'âge (~150
+  centenaires, piège verrouillé « pas de clip ») ne contribuent à AUCUNE contrainte
+  → direction dégénérée que l'IPU exploitait (+9,2 % de taille sur 381510103 avec
+  toutes contraintes exactes : 361 personnes pondérées « invisibles »). Ménages
+  concernés écartés du pool (les centenaires disparaissent des agents, ~0,01 %).
+- **Tilt final de taille moyenne** (`w′ = w·exp(θ·taille)`, θ par bisection →
+  E[taille pondérée] = P22_POP/P22_MEN exactement). **Pourquoi** : quand les cibles
+  INSEE sont mutuellement incohérentes (C22 vs P22, âge vs composition vs pool
+  communal), l'IPU converge sur un compromis où la taille moyenne — un RATIO,
+  aveugle aux contraintes de niveau — reste fausse (mesuré : +3 à +42 % selon
+  l'ordre des contraintes, aucun ordre ne gagne). Le tilt est la correction de
+  plus petite divergence (max-entropie) sur la contrainte de moyenne. Coût assumé
+  et mesuré : la FORME d'âge se dégrade là où les données INSEE se contredisent
+  (TV attendue ≤ 0,16 sur 381510102, ~0 ailleurs) — la population et le nombre de
+  ménages priment (D1/D2), le WARNING par IRIS signale les quartiers dégradés.
 
 **Décisions verrouillées (session prépa Fable) — NE PAS re-trancher :**
 - **D1 — Option A.** On honore le **nombre de ménages** (`menages_alloues`) et la
@@ -372,14 +411,16 @@ ci-dessus ; valider sur données réelles avant de committer ce chantier.
   synthétique (schéma `household_id`/`role`, K1-K14 : 0 orphelin, 0 ménage éclaté,
   conservation des ménages == `menages_alloues`, éducation adaptée à l'âge,
   déterminisme du nb de ménages…).
-- `tests/test_households_realdata.py` (13 tests) — **cohérence + correctness** sur
+- `tests/test_households_realdata.py` (14 tests) — **cohérence + correctness** sur
   vraies données (skippé si cache RP / IRIS / bâti absents). *Gates certaines*
   (exactes) : conservation ménages, `population_allouee` recalculé ==
-  `groupby(home_id)` (D2), 0 orphelin, 1 référent/ménage ordinaire. *Gates à seuil* :
-  constantes EMPIRIQUES calibrées sur 10 seeds (valeurs mesurées en commentaire) —
-  le bruit de tirage domine à la taille de la zone test, cf. décisions de session
-  ci-dessus. Diagnostic runtime : `IRIS_FIT_WARN_THRESHOLD` + un WARNING par IRIS
-  mal calé (l'utilisateur sait quels quartiers sont moins fiables).
+  `groupby(home_id)` (D2), 0 orphelin, 1 référent/ménage ordinaire. *Gates à
+  seuil* : constantes EMPIRIQUES calibrées sur la zone 9 IRIS, 10 seeds (valeurs
+  mesurées en commentaire) — identités comptables serrées (headcount, taille
+  moyenne, y c. **par IRIS**), forme des distributions plus lâche (arbitrage du
+  tilt, cf. décisions itération 2). Diagnostic runtime : `IRIS_FIT_WARN_THRESHOLD`
+  + un WARNING par IRIS mal calé (l'utilisateur sait quels quartiers sont moins
+  fiables).
 
 ---
 

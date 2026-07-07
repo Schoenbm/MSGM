@@ -333,6 +333,8 @@ def step_env(verbose: bool = False, config_path: str = "config.yaml", assume_yes
         iris_urls["pop_url"] = cfg.insee_pop_url
     if cfg.insee_logement_url:
         iris_urls["log_url"] = cfg.insee_logement_url
+    if cfg.insee_familles_url:
+        iris_urls["fam_url"] = cfg.insee_familles_url
 
     # 1. Zone population (IRIS + INSEE)
     log.info("[1/6] Zone population (IRIS + INSEE)")

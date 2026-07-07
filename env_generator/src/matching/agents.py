@@ -276,12 +276,15 @@ def generate_household_agents(
     """Génère la population en tirant des MÉNAGES RÉELS (sample-based, briques 3-4).
 
     Par bâtiment résidentiel, tire exactement `menages_alloues` ménages (D1) **avec
-    remise** dans le pool RP détail entier (V2), repondéré par IPU sur les marges
-    `age_*`/`csp_*` de l'IRIS du bâtiment (V1 : un calage par IRIS), puis instancie
-    leurs membres réels (âge, CSP, rôle LPRM observés → lien parent→enfant exporté,
-    V5). La population par bâtiment devient stochastique (vraies tailles de
-    ménages) mais reproductible à seed fixé ; le nombre de ménages, lui, est
-    déterministe (D6).
+    remise** dans le pool RP détail entier (V2), repondéré par IPU ménage×individu
+    (V1 : un calage par IRIS) sur les marges `age_*`/`csp_*` de l'IRIS + la
+    **composition des ménages** (`men_*` ← C22_MEN*, pince la distribution des
+    tailles) + un **tilt final de taille moyenne** (population/ménages garanti même
+    quand les cibles INSEE se contredisent — cf. households.weights_for), puis
+    instancie leurs membres réels (âge, CSP, rôle LPRM observés → lien
+    parent→enfant exporté, V5). La population par bâtiment devient stochastique
+    (vraies tailles de ménages) mais reproductible à seed fixé ; le nombre de
+    ménages, lui, est déterministe (D6).
 
     Replis (D5) : IRIS aux poids IPU dégénérés → tirage aux poids IPONDI bruts du
     pool départemental (structure familiale préservée) ; pool RP vide ou
@@ -314,7 +317,12 @@ def generate_household_agents(
     """
     # Import local : households.py importe AGE_BANDS/ALL_CSP_COLS de ce module —
     # un import module-level serait circulaire.
-    from src.matching.households import AGE_COLS, CSP_COLS, HouseholdReweighter
+    from src.matching.households import (
+        AGE_COLS,
+        CSP_COLS,
+        HH_TYPE_COLS,
+        HouseholdReweighter,
+    )
 
     if members is None or len(members) == 0:
         return _fallback_individual(residential, all_buildings, education, usages,
@@ -346,6 +354,17 @@ def generate_household_agents(
     csp_cols = [c for c in CSP_COLS if c in res.columns]
     targets = res.groupby("_iris")[age_cols + csp_cols].sum()
 
+    # Marges de COMPOSITION des ménages (C22_MEN* → men_*, valeurs de cellule
+    # forwardées par spatial_join, constantes par IRIS → first). Elles pincent la
+    # distribution des TAILLES de ménage dans l'IPU (Ye et al. 2009) ; sans elles,
+    # seule la contrainte du nombre total s'applique (taille non pincée : +31 %
+    # local mesuré). Somme nulle / colonnes absentes = indisponible → repli.
+    hh_type_cols = [c for c in HH_TYPE_COLS if c in res.columns]
+    hh_type_by_iris = res.groupby("_iris")[hh_type_cols].first() if hh_type_cols else None
+    if hh_type_by_iris is None:
+        logger.info("Marges de composition des ménages absentes — l'IPU ne contraint "
+                    "que le NOMBRE de ménages (taille non pincée)")
+
     reweighter = HouseholdReweighter(pool)
     # Bornes des membres de chaque ménage dans le pool trié par hh_id (contigu).
     # factorize(sort=True) suit le même ordre que reweighter.hh_ids (sorted unique).
@@ -373,6 +392,7 @@ def generate_household_agents(
     p_y: list[np.ndarray] = []
     hh_counter = 0
     n_iris_warned = 0
+    worst_size = ("-", 0.0, 0.0, 0.0)  # (iris, écart relatif, attendu, cible)
 
     for iris_code in targets.index:  # ordre trié (groupby) → déterministe
         mask = res_iris == iris_code
@@ -381,13 +401,33 @@ def generate_household_agents(
         if total == 0:
             continue
 
+        # Cibles de composition rescalées : Σ classes = nb de ménages tirés
+        # (= P22_MEN). Le niveau C22 (exploitation complémentaire) peut différer
+        # de P22_MEN (mesuré jusqu'à +38 % sur un petit IRIS) — on garde les
+        # PROPORTIONS C22 au niveau P22.
+        hh_t = None
+        if hh_type_by_iris is not None:
+            raw = hh_type_by_iris.loc[iris_code]
+            raw_sum = float(raw.sum())
+            if raw_sum > 0:
+                hh_t = raw * (total / raw_sum)
+
         w = _iris_weights(reweighter, targets.loc[iris_code, age_cols],
-                          targets.loc[iris_code, csp_cols], total, iris_code)
+                          targets.loc[iris_code, csp_cols], hh_t, total, iris_code)
         if w is None:
             n_iris_warned += 1
             w = np.where(np.isfinite(reweighter.init_weight), reweighter.init_weight, 0.0)
             if w.sum() <= 0:
                 w = np.ones(len(reweighter.hh_ids))
+
+        # Diagnostic taille : taille moyenne attendue du tirage (pondérée) vs
+        # cible INSEE de l'IRIS (population / ménages). Le pire IRIS est loggé.
+        exp_size = float((w * hh_sizes).sum() / w.sum())
+        target_size = float(targets.loc[iris_code, age_cols].sum()) / total
+        if target_size > 0:
+            rel = abs(exp_size - target_size) / target_size
+            if rel > worst_size[1]:
+                worst_size = (iris_code, rel, exp_size, target_size)
 
         drawn = rng.choice(len(reweighter.hh_ids), size=total, p=w / w.sum())
         sizes = hh_sizes[drawn]
@@ -433,6 +473,13 @@ def generate_household_agents(
     if n_iris_warned:
         logger.warning("%d IRIS tirés en repli départemental (poids IPONDI bruts, D5)",
                        n_iris_warned)
+    if worst_size[0] != "-":
+        logger.info(
+            "Taille moyenne de ménage (attendue vs cible INSEE) — pire IRIS %s : "
+            "%.3f vs %.3f (%+.1f %%)",
+            worst_size[0], worst_size[2], worst_size[3],
+            100.0 * (worst_size[2] - worst_size[3]) / worst_size[3],
+        )
 
     agents = _assign_destinations(agents, all_buildings, education, usages,
                                   decay_m, education_decay_m, seed, workplace_extra_ids)
@@ -496,32 +543,48 @@ def update_building_demographics(result: gpd.GeoDataFrame, agents: gpd.GeoDataFr
 
 
 def _iris_weights(reweighter, age_targets: pd.Series, csp_targets: pd.Series,
-                  n_households: int, iris_code: str) -> "np.ndarray | None":
+                  hh_type_targets: "pd.Series | None", n_households: int,
+                  iris_code: str) -> "np.ndarray | None":
     """Poids IPU du pool pour un IRIS ; None si dégénérés (→ repli D5 chez l'appelant).
 
-    Le calage inclut la contrainte de NOMBRE de ménages (`n_households` = Σ
-    menages_alloues de l'IRIS = P22_MEN) : sans elle, l'IPU marges-individus
-    laisse dériver le nombre implicite de ménages (+9 à +20 % mesurés) et le
-    tirage de `menages_alloues` ménages sous-peuple l'IRIS d'autant (−15 %).
-    Logge un WARNING (diagnostic runtime) quand le calage laisse plus de
-    IRIS_FIT_WARN_THRESHOLD de la masse des marges individus mal placée."""
-    from src.matching.households import AGE_COLS, CSP_COLS  # cf. import local plus haut
+    Le calage inclut des contraintes de NIVEAU MÉNAGE (Ye et al. 2009) : la
+    composition (`hh_type_targets`, C22_MEN* rescalées à Σ = menages_alloues =
+    P22_MEN) pince le nombre ET la structure des tailles de ménage. Sans marges
+    individus, le nombre implicite de ménages dérive (+9 à +20 % mesurés →
+    population −15 %) ; avec le seul nombre total (`n_households`, repli quand la
+    composition manque), la taille dérive encore localement (+31 % mesuré, IRIS
+    381510102). Logge un WARNING (diagnostic runtime) quand le calage laisse plus
+    de IRIS_FIT_WARN_THRESHOLD de la masse des marges (individus + composition)
+    mal placée."""
+    from src.matching.households import AGE_COLS, CSP_COLS, HH_TYPE_COLS
 
-    # n_iter=300 : avec la contrainte ménages (19 contraintes), 80 itérations
-    # laissent un biais résiduel (−0,29 % de population attendue mesuré sur la
-    # zone test) ; 300 le ramènent à −0,08 %. Coût : ~ms par IRIS (IPU par types).
-    w = reweighter.weights_for(age_targets, csp_targets, n_households=n_households,
-                               n_iter=300)
+    # n_iter=300 : avec les contraintes ménage (jusqu'à 23 contraintes), 80
+    # itérations laissent un biais résiduel (−0,29 % de population attendue mesuré
+    # sur la zone test) ; 300 le ramènent à −0,08 %. Coût : ~ms par IRIS (types).
+    # mean_size_target = population / ménages de l'IRIS : tilt final qui garantit
+    # la taille moyenne (donc la population tirée) même quand âge×CSP×composition
+    # sont mutuellement incohérents (cf. households.weights_for).
+    total_persons = float(sum(float(age_targets.get(c, 0.0)) for c in AGE_COLS))
+    mean_size = (total_persons / n_households) if (n_households and total_persons > 0) else None
+    w = reweighter.weights_for(
+        age_targets, csp_targets,
+        hh_type_targets=hh_type_targets,
+        n_households=None if hh_type_targets is not None else n_households,
+        mean_size_target=mean_size,
+        n_iter=300,
+    )
     if not np.all(np.isfinite(w)) or float(w.sum()) <= 0.0:
         logger.warning("IRIS %s : IPU inutilisable (poids dégénérés) — tirage en "
                        "repli départemental, poids IPONDI bruts (D5)", iris_code)
         return None
 
+    hh_t = hh_type_targets if hh_type_targets is not None else {}
     tvec = np.array([float(age_targets.get(c, 0.0)) for c in AGE_COLS]
-                    + [float(csp_targets.get(c, 0.0)) for c in CSP_COLS])
+                    + [float(csp_targets.get(c, 0.0)) for c in CSP_COLS]
+                    + [float(hh_t.get(c, 0.0)) for c in HH_TYPE_COLS])
     keep = tvec > 0
     if keep.any():
-        fitted = w @ reweighter.A
+        fitted = np.concatenate([w @ reweighter.A, w @ reweighter.type_matrix])
         misfit = float(np.abs(fitted[keep] - tvec[keep]).sum() / tvec[keep].sum())
         if misfit > IRIS_FIT_WARN_THRESHOLD:
             logger.warning(
@@ -539,13 +602,21 @@ def _sanitize_pool(members: pd.DataFrame) -> pd.DataFrame:
     population générée (volumes ~0,1 ‰, loggés ; les marges IRIS — base-ic —
     ne bougent pas) :
       - membre d'âge inconnu (AGED manquant → -1 au chargement) ;
+      - membre HORS TRANCHES d'âge (> 99 ans, ~150 centenaires sur le dép.) : ces
+        membres ne contribuent à AUCUNE contrainte d'âge (piège verrouillé : ne
+        pas les rabattre sur age_80p) → direction dégénérée que l'IPU exploite
+        pour gonfler les tailles sans payer les marges. Mesuré (IRIS 381510103,
+        avec contraintes de composition) : 361 personnes pondérées « invisibles »
+        = taille moyenne attendue +9,2 % alors que TOUTES les contraintes sont
+        exactes. Les centenaires disparaissent de la population générée (~0,01 %,
+        assumé) ;
       - ménage sans adulte (mineur seul en logement, ou singleton de communauté
         type internat) : le tirer produirait un « enfant orphelin » ;
       - ménage ordinaire sans référent unique (29 cas mesurés sur l'Isère).
     Retourne le pool trié par hh_id (blocs membres contigus pour le tirage)."""
     m = members
     by_hh = m.groupby("hh_id", sort=False)
-    ok_age = by_hh["age"].min() >= 0
+    ok_age = (by_hh["age"].min() >= 0) & (by_hh["age"].max() <= 99)
     has_adult = by_hh["age"].max() >= ADULT_MIN_AGE
     is_collective = by_hh["role"].first() == "hors_menage"  # singletons Zc_*
     one_ref = m["role"].eq("referent").groupby(m["hh_id"], sort=False).sum() == 1
@@ -554,8 +625,8 @@ def _sanitize_pool(members: pd.DataFrame) -> pd.DataFrame:
     n_drop = int((~ok).sum())
     if n_drop:
         logger.info(
-            "Pool ménages : %d ménage(s) écarté(s) avant tirage (âge inconnu %d, "
-            "sans adulte %d, référent non unique %d)",
+            "Pool ménages : %d ménage(s) écarté(s) avant tirage (âge inconnu ou "
+            ">99 : %d, sans adulte %d, référent non unique %d)",
             n_drop, int((~ok_age).sum()), int((ok_age & ~has_adult).sum()),
             int((ok_age & has_adult & ~(is_collective | one_ref)).sum()),
         )

@@ -462,5 +462,6 @@ class TestLoadIrisSelector:
             patch("src.loaders.iris._load_contours_raw", return_value=gdf),
             patch("src.loaders.iris._load_csv_from_zip", side_effect=_fake_csv),
         ):
-            load_iris(selector=Selector("departement", ("38",)), pop_url="POP", log_url="LOG")
-        assert captured == ["POP", "LOG"]
+            load_iris(selector=Selector("departement", ("38",)),
+                      pop_url="POP", log_url="LOG", fam_url="FAM")
+        assert captured == ["POP", "LOG", "FAM"]

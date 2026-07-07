@@ -51,6 +51,7 @@ class Config:
     contours_url: "str | None" = None
     insee_pop_url: "str | None" = None
     insee_logement_url: "str | None" = None
+    insee_familles_url: "str | None" = None
     # Lieux de travail (modèle gravitaire). Voir matching/workplaces.py.
     workplace_usages: "tuple[str, ...]" = DEFAULT_WORKPLACE_USAGES
     workplace_decay_m: float = 3000.0
@@ -125,6 +126,7 @@ def load_config(path: "str | Path") -> Config:
         contours_url=datasets.get("contours_iris_url"),
         insee_pop_url=datasets.get("insee_pop_url"),
         insee_logement_url=datasets.get("insee_logement_url"),
+        insee_familles_url=datasets.get("insee_familles_url"),
         workplace_usages=workplace_usages,
         workplace_decay_m=float(workplaces.get("decay_m", 3000.0)),
         workplace_seed=int(workplaces.get("seed", 42)),

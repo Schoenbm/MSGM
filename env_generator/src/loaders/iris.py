@@ -33,6 +33,10 @@ _LOG_URL = (
     "https://www.insee.fr/fr/statistiques/fichier/8647012/"
     "base-ic-logement-2022_csv.zip"
 )
+_FAM_URL = (
+    "https://www.insee.fr/fr/statistiques/fichier/8647008/"
+    "base-ic-couples-familles-menages-2022_csv.zip"
+)
 
 _CACHE_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "cache"
 _DEFAULT_DEP = "38"           # Isère
@@ -351,6 +355,7 @@ def load_iris(
     contours_url: str = _CONTOURS_URL,
     pop_url: str = _POP_URL,
     log_url: str = _LOG_URL,
+    fam_url: str = _FAM_URL,
     on_missing: str = "error",
 ) -> gpd.GeoDataFrame:
     """Load IRIS geometries + 2022 census population.
@@ -360,6 +365,9 @@ def load_iris(
     - geometry          : IRIS polygon (Lambert-93 / EPSG:2154)
     - Ind_total         : total population (P22_POP)
     - taille_moy_menage : average household size (P22_POP / P22_MEN)
+    - men_*             : ménages par classe de composition (C22_MEN*, base-ic
+                          couples-familles-ménages) — contraintes de niveau
+                          ménage de l'IPU (matching/households.HH_TYPE_COLS)
 
     Args:
         iris_codes: Liste de codes IRIS à 9 chiffres (ex. ["381850101", "381850102"]).
@@ -438,6 +446,34 @@ def load_iris(
         log[["IRIS", "P22_MEN"]], on="IRIS", how="left"
     )
 
+    # Ménages par classe de composition (base-ic couples-familles-ménages) →
+    # contraintes de niveau ménage de l'IPU (chantier ménages). Noms de sortie
+    # alignés sur matching/households.HH_TYPE_COLS. Optionnel : en cas d'échec
+    # (URL morte, réseau), le pipeline tourne sans — le tirage retombe sur la
+    # contrainte du seul nombre de ménages (taille non pincée, moins fidèle).
+    _FAM_RENAME = {
+        "C22_MENPSEUL":    "men_seul",
+        "C22_MENSFAM":     "men_sans_fam",
+        "C22_MENCOUPSENF": "men_couple_senf",
+        "C22_MENCOUPAENF": "men_couple_aenf",
+        "C22_MENFAMMONO":  "men_mono",
+    }
+    try:
+        fam = _load_csv_from_zip(
+            fam_url, "base-ic-couples-familles-menages-2022_csv.zip", csv_dep
+        )
+        fam_available = [c for c in _FAM_RENAME if c in fam.columns]
+        if len(fam_available) < len(_FAM_RENAME):
+            logger.warning("Colonnes composition absentes du fichier familles : %s",
+                           sorted(set(_FAM_RENAME) - set(fam_available)))
+        stats = stats.merge(
+            fam[["IRIS"] + fam_available].rename(columns=_FAM_RENAME),
+            on="IRIS", how="left",
+        )
+    except Exception as exc:
+        logger.warning("Base couples-familles-ménages indisponible (%s) — marges de "
+                       "composition des ménages absentes du grid", exc)
+
     # 4. Jointure géométrie + stats
     gdf = gdf.merge(stats, left_on="CODE_IRIS", right_on="IRIS", how="left")
 
@@ -458,6 +494,12 @@ def load_iris(
         if raw in gdf.columns:
             gdf[friendly] = gdf[raw].fillna(0)
             gdf = gdf.drop(columns=[raw])
+
+    # Composition des ménages : manquant → 0 (somme nulle = « indisponible » pour
+    # l'aval, qui retombe alors sur la contrainte du seul nombre de ménages).
+    men_cols_out = [c for c in _FAM_RENAME.values() if c in gdf.columns]
+    for c in men_cols_out:
+        gdf[c] = gdf[c].fillna(0)
 
     n_missing = gdf["P22_POP"].isna().sum()
     if n_missing > 0:
@@ -483,5 +525,9 @@ def load_iris(
     if csp_cols_out:
         csp_totals = {c: gdf[c].sum() for c in csp_cols_out}
         logger.info("CSP (pop 15+, GSEC 2022) : %s", csp_totals)
+
+    if men_cols_out:
+        men_totals = {c: gdf[c].sum() for c in men_cols_out}
+        logger.info("Composition des ménages (C22_MEN*, 2022) : %s", men_totals)
 
     return gdf
