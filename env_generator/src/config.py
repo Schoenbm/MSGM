@@ -57,6 +57,10 @@ class Config:
     workplace_decay_m: float = 3000.0
     workplace_seed: int = 42
     education_decay_m: float = 1200.0
+    # Affectation collège par la carte scolaire officielle (education.carte_scolaire).
+    # enabled: false → gravité pure, sans même tenter de télécharger les sources.
+    carte_scolaire_enabled: bool = True
+    carte_scolaire_private_rate: float = 0.20
 
 
 def _parse_zone(d: dict) -> ZoneConfig:
@@ -102,6 +106,7 @@ def load_config(path: "str | Path") -> Config:
     workplaces = data.get("workplaces") or {}
     workplace_usages = tuple(workplaces.get("usages", DEFAULT_WORKPLACE_USAGES))
     edu = data.get("education") or {}
+    carte_scolaire = edu.get("carte_scolaire") or {}
 
     cfg = Config(
         crs=crs,
@@ -131,6 +136,8 @@ def load_config(path: "str | Path") -> Config:
         workplace_decay_m=float(workplaces.get("decay_m", 3000.0)),
         workplace_seed=int(workplaces.get("seed", 42)),
         education_decay_m=float(edu.get("decay_m", 1200.0)),
+        carte_scolaire_enabled=bool(carte_scolaire.get("enabled", True)),
+        carte_scolaire_private_rate=float(carte_scolaire.get("private_rate", 0.20)),
     )
     logger.info(
         "Config chargée : population=%s, region=%s(buffer=%.0fm), réseaux=%s",

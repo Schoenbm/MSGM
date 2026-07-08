@@ -87,6 +87,14 @@ workplaces:
 # proche.
 education:
   decay_m: 1200              # echelle de decroissance distance (m)
+  # Affectation COLLEGE calee sur la carte scolaire officielle (secteurs par rue,
+  # data.education.gouv.fr + adresses BAN). Publics -> college de secteur
+  # (deterministe par adresse) ; prives (Bernoulli private_rate) -> gravite sur
+  # les colleges prives. Toute source indisponible -> repli gravite pure.
+  # enabled: false -> gravite pure sans meme telecharger les sources.
+  carte_scolaire:
+    enabled: true
+    private_rate: 0.20       # taux national DEPP (pas de taux communal Isere)
 
 # -- Sortie -----------------------------------------------------------------
 output:

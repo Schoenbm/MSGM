@@ -449,6 +449,43 @@ def step_env(verbose: bool = False, config_path: str = "config.yaml", assume_yes
             commute_matrix = None
     except Exception as exc:
         log.warning("MOBPRO indisponible (%s) — affectation travail par gravité pure", exc)
+    # Carte scolaire des collèges publics (affectation déterministe par adresse,
+    # granularité rue) : 3 sources — secteurs de recrutement + établissements UAI
+    # (data.education.gouv.fr) + adresses BAN. Même philosophie défensive que
+    # MOBPRO : n'importe laquelle indisponible ou vide → carte_scolaire=None
+    # (affectation collège par gravité pure, comportement historique).
+    carte_scolaire = None
+    if cfg.carte_scolaire_enabled:
+        try:
+            from src.loaders.ban import load_ban_addresses
+            from src.loaders.carte_scolaire import (
+                load_colleges_publics_prives,
+                load_secteurs_colleges,
+            )
+            from src.matching.schooling import attach_building_addresses
+
+            secteurs = load_secteurs_colleges(departement=departement.zfill(3))
+            colleges = load_colleges_publics_prives(departement=departement.zfill(3))
+            colleges = colleges[colleges.within(region_fp)].copy()
+            pop_communes = {str(c)[:5] for c in grid["CODE_IRIS"]}
+            ban = load_ban_addresses(departement=departement, communes=pop_communes)
+            # Adresses des bâtiments qui portent les agents (= résidentiels
+            # alloués), indexées par ID bâtiment (= home_id des agents).
+            addresses = attach_building_addresses(result, ban).set_index("ID")
+            if secteurs.empty or colleges.empty or addresses.empty:
+                log.warning(
+                    "Carte scolaire : source vide (secteurs=%d, collèges en zone=%d, "
+                    "adresses=%d) — affectation collège par gravité pure",
+                    len(secteurs), len(colleges), len(addresses),
+                )
+            else:
+                carte_scolaire = dict(
+                    secteurs=secteurs, colleges=colleges, addresses=addresses,
+                    private_rate=cfg.carte_scolaire_private_rate,
+                )
+        except Exception as exc:
+            log.warning("Carte scolaire indisponible (%s) — affectation collège "
+                        "par gravité pure", exc)
     agent_kwargs = dict(
         education=education,
         usages=cfg.workplace_usages,
@@ -457,6 +494,7 @@ def step_env(verbose: bool = False, config_path: str = "config.yaml", assume_yes
         seed=cfg.workplace_seed,
         workplace_extra_ids=workplace_extra_ids,
         commute_matrix=commute_matrix,
+        carte_scolaire=carte_scolaire,
     )
     # Chemin principal (chantier ménages, V3) : tirage de MÉNAGES RÉELS (pool RP
     # détail repondéré par IPU) quand menages_alloues est disponible ; sinon repli

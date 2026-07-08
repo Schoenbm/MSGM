@@ -68,6 +68,9 @@ Pipeline `python -m src.main --step env` (piloté par `config.yaml`), tout en
 | MOBPRO (INSEE) | 2022 | `loaders/mobpro.py` | Flux domicile-travail commune→commune → matrice P(c'\|c) de l'affectation travail (§ 3.8) | **Active** |
 | **RP détail — Individus canton-ou-ville** (INSEE) | 2022 | `loaders/rp_detail.py` | **Échantillon de ménages réels** (membres, âge, CSP, rôle) — génération sample-based en ménages (§ 3.7) | **Active** — chemin principal des agents |
 | **RP base-ic couples-familles-ménages** (INSEE) | 2022 | `loaders/iris.py` | **Composition des ménages par IRIS** (`C22_MEN*` → `men_*`) : contraintes ménage de l'IPU (distribution des tailles, § 3.7) | **Active** (optionnelle — repli nombre seul) |
+| **Carte scolaire collèges publics** (data.education.gouv.fr) | live | `loaders/carte_scolaire.py` | **Secteurs de recrutement par rue** (commune + voie + plage de numéros + parité → UAI) : affectation collège déterministe (§ 3.8bis) | **Active** (optionnelle — repli gravité) |
+| **Établissements 1er/2nd degré** (data.education.gouv.fr) | live | `loaders/carte_scolaire.py` | **Collèges géolocalisés avec UAI** (public + privé, Lambert-93) — remplace le BPE pour le seul niveau collège (le BPE n'a pas l'UAI, donc pas de clé vers la carte scolaire) | **Active** (optionnelle — repli gravité) |
+| **BAN** (adresse.data.gouv.fr) | live | `loaders/ban.py` | **Adresses ponctuelles** (numéro + voie + commune, Lambert-93) : rattachement bâtiment → adresse (≤ 50 m) pour résoudre le secteur collège (§ 3.8bis) | **Active** (optionnelle — repli gravité) |
 
 Toutes les sources distantes passent par le **cache unique** (`loaders/cache.py`,
 `ensure_cached` : check local → contrôle d'intégrité → (re)production atomique).
@@ -219,11 +222,59 @@ Gravité (inspirée du localisateur `spll`/`GravityFunction` de Genstar) :
   Capacité = surface de plancher. Commune d'un bâtiment = `code_iris[:5]`
   (l'attribut BD TOPO de `buildings_all`, lacunaire : les bâtiments sans code
   restent tirables au repli global mais pas à l'étape intra-commune).
-- **crèche/école/collège/lycée** : équipements **BPE** géolocalisés (`bpe.py`,
-  codes `TYPEQU`), gravité de proximité pure. Capacité unité (capacité d'accueil
-  BPE non renseignée pour l'enseignement → proximité dominante).
+- **crèche/école/lycée** : équipements **BPE** géolocalisés (`bpe.py`, codes
+  `TYPEQU`), gravité de proximité pure. Capacité unité (capacité d'accueil BPE
+  non renseignée pour l'enseignement → proximité dominante).
   `education.decay_m` = **1200 m**. Collège/lycée retombent sur le pool « école »
   si vide.
+- **collège** : carte scolaire officielle, pas la gravité — cf. § 3.8bis
+  (la gravité BPE reste le repli quand les sources sont indisponibles).
+
+### 3.8bis Collège — affectation par la carte scolaire (`matching/schooling.py`)
+
+En France, l'affectation en collège public suit une **carte scolaire officielle**
+(secteur de recrutement par adresse), pas la proximité : la gravité pure était
+irréaliste pour ce niveau. Chemin principal (`assign_colleges_carte_scolaire`,
+même esprit 2 étapes que MOBPRO) :
+
+1. statut **public/privé** tiré **par ménage** — `Bernoulli(private_rate)`,
+   **`private_rate` = 0,20** (taux national DEPP ; pas de taux communal
+   disponible pour l'Isère, on ne cherche pas plus précis). Les collégiens d'un
+   même ménage partagent le statut (une fratrie va dans le même secteur, elle
+   n'est pas tirée agent par agent) ; repli par agent si `household_id` est
+   absent (chemin individus indépendants) ;
+2. **privé** → gravité (§ 3.8) restreinte aux collèges `secteur = "Privé"`
+   (repli gravité globale si aucun privé dans la zone) ;
+3. **public** → résolution **déterministe** par la carte scolaire : adresse BAN
+   du bâtiment domicile (jointure plus-proche-voisin ≤ **50 m**,
+   `attach_building_addresses`) → ligne de secteur (commune + nom de voie
+   normalisé + numéro dans `[n_de_voie_debut, n_de_voie_fin]` + parité P/I/PI,
+   `resolve_college_sector`) → collège UAI. Une commune en `secteur_unique="O"`
+   envoie toute la commune au même collège (la rue est ignorée). Tout échec —
+   pas d'adresse BAN dans le rayon, rue inconnue, numéro hors plage ou parité
+   incompatible, UAI hors zone d'étude — → repli gravité restreinte aux collèges
+   publics (ou globale si vide).
+
+Décisions verrouillées :
+- **Granularité = la RUE, pas l'IRIS** (vérifié sur les données : une même
+  commune, souvent un seul IRIS, peut être coupée en plusieurs secteurs par rue —
+  ex. Apprieu, 38013). D'où la jointure BAN obligatoire, pas de raccourci IRIS.
+  La normalisation des noms de voie (`src/text_utils.py::normalize_voie` :
+  majuscules, accents/apostrophes/tirets neutralisés) est appliquée à
+  l'identique des deux côtés (BAN et carte scolaire) — validé sur données
+  réelles : > 60 % des adresses de Grenoble résolvent directement.
+- **Nouvelle source établissements** (avec UAI) pour le seul niveau collège :
+  le BPE n'a pas d'identifiant UAI, donc aucune clé de jointure vers la carte
+  scolaire. École/lycée/crèche restent sur le BPE, inchangés (aucune carte
+  scolaire ouverte pour ces niveaux en Isère — dataset national = collèges
+  publics uniquement, vérifié).
+- **Capacité = 1,0 constante** : aucune capacité fiable dans aucune source (le
+  `CAPACITE_D_ACCUEIL` du BPE est toujours `_Z` pour les collèges/lycées).
+- **Philosophie défensive** (comme MOBPRO) : les 3 sources (secteurs,
+  établissements, BAN) se chargent dans un try/except de `step_env` ; n'importe
+  laquelle indisponible ou vide → gravité pure BPE (comportement historique),
+  le pipeline tourne sans réseau. `education.carte_scolaire.enabled: false`
+  désactive sans même tenter le téléchargement.
 
 ### 3.9 Fonction des bâtiments — POI stratégiques & éducation (`loaders/poi.py`)
 
@@ -286,6 +337,9 @@ crise**) → **crisis_gen** (NN D1-D5, inondation, capacité de refuge selon la 
 | `workplaces.decay_m` | 3000 | config.yaml | décroissance distance domicile-travail (gravité **intra-commune** depuis MOBPRO ; échelle globale en repli) |
 | `workplaces.seed` | 42 | config.yaml | reproductibilité des tirages |
 | `education.decay_m` | 1200 | config.yaml | décroissance distance école (plus court) |
+| `education.carte_scolaire.enabled` | true | config.yaml | affectation collège par carte scolaire (§ 3.8bis) ; false = gravité pure sans téléchargement |
+| `education.carte_scolaire.private_rate` | 0,20 | config.yaml | part de collégiens dans le privé (taux national DEPP) |
+| `ADDRESS_MAX_DIST_M` | 50 m | schooling.py | rayon de rattachement bâtiment → adresse BAN (constante) |
 | `sources.bdnb` | chemin gpkg | config.yaml | BDNB (optionnelle) |
 | `ADULT_MIN_AGE` | 18 | agents.py | seuil adulte (CSP) |
 | `RETIREMENT_AGE` | 62 | agents.py | au-delà → retraite (pas de travail) |
@@ -357,6 +411,28 @@ crise**) → **crisis_gen** (NN D1-D5, inondation, capacité de refuge selon la 
   (réécrit par `spatial_join`, str 9 car.) ; côté lieux de travail (`buildings_all`)
   l'attribut BD TOPO est lacunaire → parse tolérant, bâtiments sans code tirables
   seulement au repli global.
+
+### Session 2026-07 — chantier carte scolaire (affectation collège)
+
+- **Collège = carte scolaire officielle, plus la gravité** (§ 3.8bis) : les
+  publics sont affectés au collège de secteur de leur adresse (déterministe),
+  les privés (Bernoulli 0,20 tiré **par ménage** — fratrie cohérente, taux
+  national DEPP) par gravité restreinte au privé. École/lycée/crèche inchangés (aucune carte scolaire ouverte pour ces
+  niveaux — vérifié, dataset national = collèges publics uniquement).
+- **Granularité = la rue** (vérifié : une commune mono-IRIS peut être coupée en
+  plusieurs secteurs par rue, ex. Apprieu 38013) → jointure des bâtiments
+  résidentiels à la **BAN** (plus proche voisin ≤ 50 m), pas de raccourci IRIS.
+  Normalisation des noms de voie identique des deux côtés
+  (`text_utils.normalize_voie`) ; validé sur données réelles (> 60 % des
+  adresses de Grenoble résolvent directement).
+- **Nouvelle source établissements avec UAI** (data.education.gouv.fr) pour le
+  seul niveau collège : le BPE n'a pas d'UAI, donc pas de clé de jointure vers
+  la carte scolaire. Capacité = 1,0 constante (le `CAPACITE_D_ACCUEIL` BPE est
+  toujours `_Z` pour collèges/lycées — vérifié, ne pas re-chercher).
+- **Replis en cascade** (philosophie MOBPRO) : échec de résolution → gravité
+  restreinte au public ; pool public/privé vide → gravité globale ; n'importe
+  laquelle des 3 sources indisponible → gravité pure BPE (le pipeline tourne
+  sans réseau). `education.carte_scolaire.enabled: false` coupe tout.
 
 (Historique fin : `git log` du dépôt.)
 

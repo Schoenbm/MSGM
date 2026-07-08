@@ -45,6 +45,7 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 
+from src.matching.schooling import assign_colleges_carte_scolaire
 from src.matching.workplaces import (
     ACTIVE_CSP_COLS,
     DEFAULT_WORKPLACE_USAGES,
@@ -109,6 +110,7 @@ def generate_agents(
     seed: int = 42,
     workplace_extra_ids: "set[str] | None" = None,
     commute_matrix: "pd.DataFrame | None" = None,
+    carte_scolaire: "dict | None" = None,
 ) -> gpd.GeoDataFrame:
     """Génère un GeoDataFrame d'agents individuels (domicile, âge, CSP, activité).
 
@@ -139,6 +141,9 @@ def generate_agents(
                      Si fournie, le lieu de travail est tiré en 2 étapes calées
                      sur les flux réels (assign_workplaces_mobpro) ; sinon
                      gravité pure sur toute la région (chemin historique).
+        carte_scolaire: sources de l'affectation collège par carte scolaire
+                     (dict `secteurs`/`colleges`/`addresses`/`private_rate`,
+                     cf. _assign_destinations). None → gravité pure (historique).
 
     Returns:
         GeoDataFrame, une ligne par agent. Colonnes : agent_id, home_id, age,
@@ -220,7 +225,7 @@ def generate_agents(
     home_communes = _home_communes(res) if commute_matrix is not None else None
     return _assign_destinations(agents, all_buildings, education, usages,
                                 decay_m, education_decay_m, seed, workplace_extra_ids,
-                                commute_matrix, home_communes)
+                                commute_matrix, home_communes, carte_scolaire)
 
 
 def _assign_destinations(
@@ -234,6 +239,7 @@ def _assign_destinations(
     workplace_extra_ids: "set[str] | None",
     commute_matrix: "pd.DataFrame | None" = None,
     home_communes: "pd.Series | None" = None,
+    carte_scolaire: "dict | None" = None,
 ) -> gpd.GeoDataFrame:
     """Affecte les destinations par activité, chacune sur son propre jeu d'équipements.
 
@@ -244,7 +250,13 @@ def _assign_destinations(
     Travail : si `commute_matrix` (MOBPRO, P(c'|c)) et `home_communes` (ID bâtiment
     -> commune de résidence) sont fournis, affectation en 2 étapes calée sur les
     flux réels (assign_workplaces_mobpro) ; sinon gravité pure (repli global).
-    Les autres activités (école/crèche…) restent en gravité de proximité.
+
+    Collège : si `carte_scolaire` est fourni et complet (clés `secteurs` — table
+    des secteurs de recrutement —, `colleges` — établissements UAI public+privé
+    de la zone —, `addresses` — adresses BAN des domiciles indexées par home_id —
+    et `private_rate` optionnelle), l'affectation suit la carte scolaire
+    officielle (assign_colleges_carte_scolaire) ; sinon gravité pure sur le
+    sous-ensemble BPE (comportement historique). École/lycée/crèche inchangées.
     """
     crs = agents.crs
     agents["dest_id"] = pd.array([pd.NA] * len(agents), dtype="object")
@@ -266,13 +278,24 @@ def _assign_destinations(
                    else pd.Series(pd.NA, index=workplaces.index))
         workplaces["commune"] = wp_iris.map(_commune_code)
 
+    # Carte scolaire collège : active seulement si TOUTES les sources sont là
+    # (secteurs + établissements UAI + adresses BAN) ; sinon comportement
+    # historique (gravité pure sur le sous-ensemble BPE).
+    use_carte = carte_scolaire is not None and all(
+        carte_scolaire.get(k) is not None and len(carte_scolaire[k]) > 0
+        for k in ("secteurs", "colleges", "addresses")
+    )
+    college_facilities = (carte_scolaire["colleges"] if use_carte
+                          else _education_subset(education, ACT_COLLEGE, crs,
+                                                 fallback=ACT_ECOLE))
+
     # Collège/lycée retombent sur le pool "école" si leur sous-ensemble BPE est
     # vide (sécurité ; en pratique BPE distingue les niveaux par TYPEQU).
     plans = [
         (ACT_TRAVAIL, workplaces, "ID", "lieu de travail", decay_m),
         (ACT_CRECHE, _education_subset(education, ACT_CRECHE, crs), "equip_id", "crèche", education_decay_m),
         (ACT_ECOLE, _education_subset(education, ACT_ECOLE, crs), "equip_id", "école", education_decay_m),
-        (ACT_COLLEGE, _education_subset(education, ACT_COLLEGE, crs, fallback=ACT_ECOLE), "equip_id", "collège", education_decay_m),
+        (ACT_COLLEGE, college_facilities, "equip_id", "collège", education_decay_m),
         (ACT_LYCEE, _education_subset(education, ACT_LYCEE, crs, fallback=ACT_ECOLE), "equip_id", "lycée", education_decay_m),
     ]
     for activity, facilities, id_col, label, decay in plans:
@@ -288,6 +311,11 @@ def _assign_destinations(
             workers["commune"] = workers["home_id"].map(home_communes)
             assigned = assign_workplaces_mobpro(workers, facilities, commute_matrix,
                                                 decay_m=decay, seed=seed)
+        elif activity == ACT_COLLEGE and use_carte:
+            assigned = assign_colleges_carte_scolaire(
+                sub, carte_scolaire["addresses"], carte_scolaire["secteurs"],
+                facilities, decay_m=decay,
+                private_rate=carte_scolaire.get("private_rate", 0.20), seed=seed)
         else:
             assigned = assign_facilities(sub, facilities, decay_m=decay, seed=seed,
                                          id_col=id_col, label=label)
@@ -308,6 +336,7 @@ def generate_household_agents(
     seed: int = 42,
     workplace_extra_ids: "set[str] | None" = None,
     commute_matrix: "pd.DataFrame | None" = None,
+    carte_scolaire: "dict | None" = None,
 ) -> gpd.GeoDataFrame:
     """Génère la population en tirant des MÉNAGES RÉELS (sample-based, briques 3-4).
 
@@ -347,6 +376,8 @@ def generate_household_agents(
         workplace_extra_ids: ID BD TOPO d'emploi récupérés via la BDNB.
         commute_matrix: matrice MOBPRO P(c'|c) — travail affecté en 2 étapes
                      calées sur les flux réels si fournie (cf. generate_agents).
+        carte_scolaire: sources de l'affectation collège par carte scolaire
+                     (cf. generate_agents / _assign_destinations).
 
     Returns:
         GeoDataFrame, une ligne par agent. Colonnes de generate_agents +
@@ -365,11 +396,13 @@ def generate_household_agents(
     if members is None or len(members) == 0:
         return _fallback_individual(residential, all_buildings, education, usages,
                                     decay_m, education_decay_m, seed,
-                                    workplace_extra_ids, commute_matrix, "pool RP vide")
+                                    workplace_extra_ids, commute_matrix,
+                                    carte_scolaire, "pool RP vide")
     if "menages_alloues" not in residential.columns:
         return _fallback_individual(residential, all_buildings, education, usages,
                                     decay_m, education_decay_m, seed,
                                     workplace_extra_ids, commute_matrix,
+                                    carte_scolaire,
                                     "menages_alloues absent (mode Filosofi ?)")
 
     pool = _sanitize_pool(members)
@@ -377,7 +410,7 @@ def generate_household_agents(
         return _fallback_individual(residential, all_buildings, education, usages,
                                     decay_m, education_decay_m, seed,
                                     workplace_extra_ids, commute_matrix,
-                                    "pool RP vide après garde-fous")
+                                    carte_scolaire, "pool RP vide après garde-fous")
 
     crs = residential.crs
     res = residential.loc[residential["menages_alloues"].fillna(0) > 0].copy()
@@ -523,7 +556,7 @@ def generate_household_agents(
     home_communes = _home_communes(res) if commute_matrix is not None else None
     agents = _assign_destinations(agents, all_buildings, education, usages,
                                   decay_m, education_decay_m, seed, workplace_extra_ids,
-                                  commute_matrix, home_communes)
+                                  commute_matrix, home_communes, carte_scolaire)
 
     # D2 : une seule vérité de population — population_allouee recalculé EN PLACE
     # depuis les agents. casualties.py (lecteur de population_allouee) reste juste.
@@ -677,7 +710,7 @@ def _sanitize_pool(members: pd.DataFrame) -> pd.DataFrame:
 
 def _fallback_individual(residential, all_buildings, education, usages, decay_m,
                          education_decay_m, seed, workplace_extra_ids,
-                         commute_matrix, reason: str) -> gpd.GeoDataFrame:
+                         commute_matrix, carte_scolaire, reason: str) -> gpd.GeoDataFrame:
     """Dernier recours (D5/V3) : ancien tirage d'individus, schéma ménages conservé."""
     logger.warning("Tirage en ménages impossible (%s) — repli sur le tirage "
                    "d'individus indépendants (generate_agents)", reason)
@@ -685,7 +718,8 @@ def _fallback_individual(residential, all_buildings, education, usages, decay_m,
                              usages=usages, decay_m=decay_m,
                              education_decay_m=education_decay_m, seed=seed,
                              workplace_extra_ids=workplace_extra_ids,
-                             commute_matrix=commute_matrix)
+                             commute_matrix=commute_matrix,
+                             carte_scolaire=carte_scolaire)
     agents["household_id"] = pd.array([pd.NA] * len(agents), dtype="object")
     agents["role"] = pd.array([pd.NA] * len(agents), dtype="object")
     return agents

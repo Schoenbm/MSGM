@@ -33,6 +33,7 @@ env_generator/
 ├── src/
 │   ├── main.py                  # CLI --step {load,match,export,visualize,compare,casualties,all,env}
 │   ├── config.py                # lecture config.yaml (Config, ZoneConfig)
+│   ├── text_utils.py            # normalize_voie : normalisation des noms de voie (BAN ↔ carte scolaire)
 │   ├── loaders/
 │   │   ├── iris.py              # CONTOURS-IRIS + INSEE RP 2022 ; Selector, resolve_zone, validate_subset
 │   │   ├── osm.py               # OSM via Overpass : enrichissement bâtiments (flats/levels)
@@ -42,12 +43,15 @@ env_generator/
 │   │   ├── bpe.py               # BPE 2024 : équipements éducatifs géolocalisés (crèche/école/collège/lycée)
 │   │   ├── bdnb.py              # BDNB (CSTB) : usage (residentiel/travail/annexe) -> qualifie Indiff. ; + matériaux/période (ffo) pour vulnérabilité
 │   │   ├── mobpro.py            # flux domicile-travail INSEE (MOBPRO 2022) -> matrice P(c'|c) travail
+│   │   ├── carte_scolaire.py    # secteurs collèges publics (par rue) + collèges UAI géolocalisés (data.education.gouv.fr)
+│   │   ├── ban.py               # adresses BAN (numéro + voie + point Lambert-93) par département
 │   │   └── rp_detail.py         # RP détail (indiv. canton-ou-ville 2022) : échantillon de ménages réels (chemin ménages)
 │   ├── matching/
 │   │   ├── spatial_join.py      # centroïdes bâtiments ↔ grille (porte âge/CSP + code_iris d'allocation)
 │   │   ├── allocator.py         # allocation pop/ménages + âge/CSP (plus fort reste)
 │   │   ├── agents.py            # génère les agents : MÉNAGES réels (principal) ou individus (repli)
 │   │   ├── workplaces.py        # domicile-travail : 2 étapes calées MOBPRO (commune puis gravité) + gravité pure en repli
+│   │   ├── schooling.py         # affectation COLLÈGE par la carte scolaire (public déterministe + privé gravité)
 │   │   └── households.py        # IPU ménage×individu : marges IRIS + composition ménages + tilt taille
 │   ├── output/
 │   │   ├── export.py            # merge_buildings + export_buildings (complète) ; build_env_layer/export_env (contrat env) ; export_agents
@@ -55,7 +59,7 @@ env_generator/
 │   │   ├── compare.py / compare_grid.py  # validation vs recensement
 │   │   └── casualties.py        # victimes/sans-abris depuis dommages D1..D5
 │   └── utils/logging_config.py
-└── tests/                       # pytest (~411 tests ; test_*realdata.py skippés si cache/données absents)
+└── tests/                       # pytest (~448 tests ; test_*realdata.py skippés si cache/données absents)
 ```
 
 > ⚠️ `loaders/osm.py` concerne les **bâtiments** (tags flats/levels), PAS le
@@ -126,11 +130,23 @@ affecte par activité une destination tirée par `P(j|i) ∝ capacité_j × exp(
   `extra_ids`, cf. `loaders/bdnb.py`) rattrapent une partie des « Indifférencié »
   exclus par la BD TOPO (~+4 500 lieux de travail sur la métropole). Capacité =
   surface de plancher ; `workplaces.decay_m` (déf. 3000 m, gravité intra-commune).
-- **crèche / école / collège / lycée** : équipements **BPE** géolocalisés
+- **crèche / école / lycée** : équipements **BPE** géolocalisés
   (`loaders.bpe.load_bpe_education`, codes `TYPEQU` → niveau exact) ; capacité
   unité (la capacité d'accueil BPE n'est pas renseignée pour l'enseignement →
   proximité dominante) ; `education.decay_m` (déf. 1200 m, plus court — on
   scolarise au plus proche). Collège/lycée retombent sur le pool « école » si vide.
+- **collège — carte scolaire officielle** (`matching/schooling.py`, cf.
+  METHODE.md § 3.8bis) : tirage public/privé PAR MÉNAGE (Bernoulli,
+  `education.carte_scolaire.private_rate` = 0,20 DEPP national ; fratrie dans le
+  même secteur, repli par agent si `household_id` absent), publics
+  affectés DÉTERMINISTIQUEMENT au collège de secteur de leur adresse (secteurs
+  par RUE de data.education.gouv.fr + adresses BAN, jointure bâtiment→adresse
+  ≤ 50 m), privés par gravité restreinte aux collèges privés. Établissements =
+  dataset UAI géolocalisé (le BPE n'a pas d'UAI, pas de clé vers la carte
+  scolaire) ; capacité 1,0 constante (aucune source fiable, vérifié). Replis en
+  cascade jusqu'à la gravité pure BPE si une source manque ;
+  `education.carte_scolaire.enabled: false` désactive tout. École/lycée/crèche
+  strictement inchangés (pas de carte scolaire ouverte pour ces niveaux).
 
 Sorties (`output/export.py`) — pensées pour **3 modules** (env_generator
 indépendant de la crise → crisis_gen → simulation) :
@@ -221,6 +237,9 @@ domicile-travail INSEE 2022 (commune→commune, ~11 Mo, `NBFLUX_C22_ACTOCC15P`).
 | **MOBPRO** (INSEE) | 2022 | `loaders/mobpro.py` | Flux domicile-travail commune→commune → matrice `P(c'\|c)` de l'affectation travail (2 étapes, clip région). Optionnelle : sans elle, gravité pure. | **Active** | https://www.insee.fr/fr/statistiques/8582949 |
 | **RP détail — Individus canton-ou-ville** (INSEE) | 2022 | `loaders/rp_detail.py` | **Échantillon de ménages réels** (membres + âge + CSP + rôle `LPRM`) pour la génération sample-based en ménages (`generate_household_agents`). Zone E (contient l'Isère). | **Active** — chemin principal des agents en `--source iris` | https://www.insee.fr/fr/statistiques/8647104 |
 | **RP base-ic — couples-familles-ménages** (INSEE) | 2022 | `loaders/iris.py` | **Composition des ménages par IRIS** (`C22_MENPSEUL/SFAM/COUPSENF/COUPAENF/FAMMONO` → `men_*`) : contraintes de niveau ménage de l'IPU (pince la distribution des tailles). Optionnelle : sans elle, repli sur la contrainte du seul nombre. | **Active** | https://www.insee.fr/fr/statistiques/8647008 |
+| **Carte scolaire collèges publics** (MEN) | live | `loaders/carte_scolaire.py` | **Secteurs de recrutement par rue** (commune + voie + numéros + parité → UAI) : affectation collège déterministe. Optionnelle : sans elle, gravité pure. | **Active** | https://data.education.gouv.fr/explore/dataset/fr-en-carte-scolaire-colleges-publics |
+| **Établissements 1er/2nd degré** (MEN) | live | `loaders/carte_scolaire.py` | **Collèges géolocalisés avec UAI** (public + privé, Lambert-93) — remplace le BPE pour le seul niveau collège (le BPE n'a pas d'UAI). | **Active** | https://data.education.gouv.fr/explore/dataset/fr-en-adresse-et-geolocalisation-etablissements-premier-et-second-degre |
+| **BAN** (DINUM/IGN) | live | `loaders/ban.py` | **Adresses ponctuelles** (numéro + voie + commune) : rattachement bâtiment résidentiel → adresse (≤ 50 m) pour résoudre le secteur collège. | **Active** | https://adresse.data.gouv.fr |
 
 > Toutes les sources distantes passent par le **pipeline de cache unique**
 > (`loaders/cache.py`, `ensure_cached`). Millésimes couplés au code (RP/MOBPRO 2022,

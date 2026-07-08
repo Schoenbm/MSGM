@@ -90,6 +90,15 @@ def valid_zip(path: Path) -> bool:
     return zipfile.is_zipfile(path)
 
 
+def valid_nonempty(path: Path) -> bool:
+    """True si ``path`` est un fichier non vide (téléchargement CSV brut : un
+    transfert interrompu laisse un fichier vide ou absent)."""
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
 def valid_7z(path: Path) -> bool:
     """True si ``path`` est une archive 7z ouvrable."""
     try:
