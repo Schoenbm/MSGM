@@ -308,6 +308,8 @@ def step_env(verbose: bool = False, config_path: str = "config.yaml", assume_yes
     from src.loaders.buildings import load_all_buildings, prepare_residential, absorb_slivers
     from src.loaders.poi import fetch_osm_pois, match_pois_to_buildings, match_education_to_buildings, merge_fonctions
     from src.loaders.rp_detail import load_rp_households
+    from src.loaders.mobpro import load_mobpro
+    from src.matching.workplaces import build_commute_matrix
     from src.matching.spatial_join import join_buildings_to_insee
     from src.matching.allocator import allocate_population
     from src.matching.agents import (
@@ -432,6 +434,21 @@ def step_env(verbose: bool = False, config_path: str = "config.yaml", assume_yes
     log.info("[7/8] Génération des agents")
     # Lieux de travail récupérés via la BDNB (catégorie "travail").
     workplace_extra_ids = employment_ids(bdnb_usage)
+    # Calage domicile-travail MOBPRO (2 étapes, D1=B) : matrice P(c'|c) des flux
+    # clippée aux communes de la RÉGION + renormalisée (D2a). Communes région =
+    # préfixes 5 des codes de la config region (ou de la zone population si
+    # `same_as`). MOBPRO indisponible → gravité pure (chemin historique).
+    commute_matrix = None
+    region_codes = (cfg.region.selector.codes if cfg.region.selector is not None
+                    else grid["CODE_IRIS"])
+    region_communes = {str(c)[:5] for c in region_codes}
+    try:
+        mobpro = load_mobpro(communes=sorted(region_communes))
+        commute_matrix = build_commute_matrix(mobpro, region_communes=region_communes)
+        if commute_matrix.empty:
+            commute_matrix = None
+    except Exception as exc:
+        log.warning("MOBPRO indisponible (%s) — affectation travail par gravité pure", exc)
     agent_kwargs = dict(
         education=education,
         usages=cfg.workplace_usages,
@@ -439,6 +456,7 @@ def step_env(verbose: bool = False, config_path: str = "config.yaml", assume_yes
         education_decay_m=cfg.education_decay_m,
         seed=cfg.workplace_seed,
         workplace_extra_ids=workplace_extra_ids,
+        commute_matrix=commute_matrix,
     )
     # Chemin principal (chantier ménages, V3) : tirage de MÉNAGES RÉELS (pool RP
     # détail repondéré par IPU) quand menages_alloues est disponible ; sinon repli

@@ -34,15 +34,19 @@ Pipeline `python -m src.main --step env` (piloté par `config.yaml`), tout en
         │                 → filtre résidentiel + porte de plausibilité (taille)
         │                 → estimation NB_LOGTS
         │
-   [5] ALLOCATION ─────── INSEE ↔ bâtiments (ménages d'abord, plus fort reste)
+   [5] POI ────────────── OSM amenities + BPE + BDNB ERP ─► colonne `fonction`
+        │                 (mairie, hôpital, école…) → flags is_strategic/is_education
+        │
+   [6] ALLOCATION ─────── INSEE ↔ bâtiments (ménages d'abord, plus fort reste)
         │                 → population + CSP + âge par bâtiment
         │
-   [6] AGENTS ─────────── MÉNAGES RÉELS (RP détail + IPU par IRIS) : membres
+   [7] AGENTS ─────────── MÉNAGES RÉELS (RP détail + IPU par IRIS) : membres
         │                 instanciés (âge, CSP, rôle → lien parent→enfant),
-        │                 household_id/role ; activité + destination par gravité
+        │                 household_id/role ; activité ; destination travail en
+        │                 2 étapes MOBPRO + gravité, éducation par gravité BPE
         │                 (repli sans pool RP : tirage d'individus indépendants)
         │
-   [7] EXPORT ─────────── buildings.* (tous + population recalculée des agents) ·
+   [8] EXPORT ─────────── buildings.* (tous + population recalculée des agents) ·
                           env.* (contrat simu) · agents.*
 ```
 
@@ -57,10 +61,11 @@ Pipeline `python -m src.main --step env` (piloté par `config.yaml`), tout en
 | RP base-ic pop+logement (INSEE) | 2022 | `loaders/iris.py` | Âge, CSP, ménages par IRIS | Active |
 | Filosofi carroyé 200 m (INSEE) | 2019 | `loaders/insee.py` | Population carroyée (`--source filosofi`) | Active (alt.) |
 | OSM bâtiments (Overpass) | live | `loaders/osm.py` | Enrichissement flats/levels + tag usage | Active — secondaire |
+| OSM POI (Overpass) | live | `loaders/poi.py` | Amenities stratégiques nommées (hôpital, mairie, caserne, gare, stade…) → colonne `fonction` (§ 3.9) | Active |
 | OSM réseau routier (osmnx) | live | `loaders/roads.py` | Réseau piéton + voiture | Active |
 | **BPE** (INSEE) | 2024 | `loaders/bpe.py` | Équipements éducatifs géolocalisés (crèche/école/collège/lycée) | Active |
 | **BDNB** (CSTB) | local ~2,5 Go | `loaders/bdnb.py` | Usage (qualifie les Indifférencié) **+ matériaux/période** (`ffo_bat_*`) pour la vulnérabilité (NN D1-D5) | Active (optionnelle) |
-| MOBPRO (INSEE) | 2022 | `loaders/mobpro.py` | Flux domicile-travail commune→commune | **Réservée** (non branchée) |
+| MOBPRO (INSEE) | 2022 | `loaders/mobpro.py` | Flux domicile-travail commune→commune → matrice P(c'\|c) de l'affectation travail (§ 3.8) | **Active** |
 | **RP détail — Individus canton-ou-ville** (INSEE) | 2022 | `loaders/rp_detail.py` | **Échantillon de ménages réels** (membres, âge, CSP, rôle) — génération sample-based en ménages (§ 3.7) | **Active** — chemin principal des agents |
 | **RP base-ic couples-familles-ménages** (INSEE) | 2022 | `loaders/iris.py` | **Composition des ménages par IRIS** (`C22_MEN*` → `men_*`) : contraintes ménage de l'IPU (distribution des tailles, § 3.7) | **Active** (optionnelle — repli nombre seul) |
 
@@ -191,20 +196,53 @@ médian de l'INSEE (max 2,3 % sur 10 seeds), 0 orphelin, conservation exacte.
   43 % lycée).
 - **Conservation** : nb d'agents = `population_allouee` totale.
 
-### 3.8 Destinations — modèle gravitaire (`matching/workplaces.py`)
-Inspiré du localisateur `spll`/`GravityFunction` de Genstar.
+### 3.8 Destinations — MOBPRO + modèle gravitaire (`matching/workplaces.py`)
+Gravité (inspirée du localisateur `spll`/`GravityFunction` de Genstar) :
 `P(destination j | domicile i) ∝ capacité_j × exp(−distance_ij / decay_m)`
 (les agents d'un même domicile partagent le vecteur de proba).
-- **travail** : bâtiments dont `USAGE1/2` ∈ usages d'emploi (Commercial et services,
-  Industriel, Agricole, Religieux, Sportif) **+ BDNB `travail`** (`extra_ids`,
-  récupère ~+4 500 lieux de travail parmi les Indifférencié). Capacité = surface de
-  plancher. `decay_m` = **3000 m**.
+- **travail — affectation en 2 étapes calée MOBPRO** (`assign_workplaces_mobpro`,
+  chemin principal) :
+  1. tirer la **commune de travail** `c'` selon `P(c'|c)` — matrice des flux
+     domicile-travail MOBPRO 2022 (`build_commute_matrix`), **clippée aux communes
+     de la région et renormalisée par ligne** (les actifs qui travailleraient hors
+     zone sont réaffectés aux destinations internes ; les entrants extérieurs =
+     chantier futur) ;
+  2. dans `c'`, tirer le **bâtiment** par la gravité ci-dessus **restreinte aux
+     lieux de travail de `c'`** (`decay_m` = 3000 m, intra-commune).
+  Replis : commune de résidence absente de la matrice, ou `c'` sans lieu de
+  travail identifié → gravité globale sur toute la région ; MOBPRO indisponible
+  (cache/réseau) → gravité pure (chemin historique). Un comparatif des plus gros
+  flux générés vs MOBPRO est loggé à chaque run (validation à l'œil).
+  Lieux de travail : bâtiments dont `USAGE1/2` ∈ usages d'emploi (Commercial et
+  services, Industriel, Agricole, Religieux, Sportif) **+ BDNB `travail`**
+  (`extra_ids`, récupère ~+4 500 lieux de travail parmi les Indifférencié).
+  Capacité = surface de plancher. Commune d'un bâtiment = `code_iris[:5]`
+  (l'attribut BD TOPO de `buildings_all`, lacunaire : les bâtiments sans code
+  restent tirables au repli global mais pas à l'étape intra-commune).
 - **crèche/école/collège/lycée** : équipements **BPE** géolocalisés (`bpe.py`,
-  codes `TYPEQU`). Capacité unité (capacité d'accueil BPE non renseignée pour
-  l'enseignement → proximité dominante). `education.decay_m` = **1200 m**.
-  Collège/lycée retombent sur le pool « école » si vide.
+  codes `TYPEQU`), gravité de proximité pure. Capacité unité (capacité d'accueil
+  BPE non renseignée pour l'enseignement → proximité dominante).
+  `education.decay_m` = **1200 m**. Collège/lycée retombent sur le pool « école »
+  si vide.
 
-### 3.9 Sorties (`output/export.py`)
+### 3.9 Fonction des bâtiments — POI stratégiques & éducation (`loaders/poi.py`)
+
+La BD TOPO bâti est **anonyme** (l'Hôtel de Ville = « Indifférencié » sans nom) ;
+cette étape (5 de `step_env`) tagge une colonne **`fonction`** (str) par bâtiment,
+dont dérivent les flags `is_strategic` / `is_education` du contrat `env` :
+- **OSM** (`fetch_osm_pois`) : amenities stratégiques nommées — hôpital, mairie,
+  caserne, police, gare, stade, culte, EHPAD, centre commercial, gymnase,
+  préfecture. Appariement au footprint BD TOPO (`match_pois_to_buildings`) :
+  nœud → point-in-polygon ; polygone → chevauchement ≥ 30 %.
+- **BPE** (`match_education_to_buildings`) : les équipements éducatifs de § 3.8
+  rapportés au footprint → `creche` / `ecole` / `college` / `lycee`.
+- **BDNB ERP** (`load_bdnb_erp`) : grands ERP catégories 1-2 en **fallback**.
+- Fusion `merge_fonctions`, priorité **OSM > éducation > BDNB ERP**.
+
+Le refuge vertical n'est PAS taggé ici (dépend de l'aléa → module crise) : le
+générateur n'expose que le substrat physique (profil vertical, § 3.10).
+
+### 3.10 Sorties (`output/export.py`)
 Architecture en 3 modules : **env_generator** (ce module, **indépendant de la
 crise**) → **crisis_gen** (NN D1-D5, inondation, capacité de refuge selon la cote)
 → **simulation**. D'où la séparation faits physiques / population / crise.
@@ -215,7 +253,8 @@ crise**) → **crisis_gen** (NN D1-D5, inondation, capacité de refuge selon la 
   `buildings_full`/`buildings_all`.)
 - **`env.{geojson,csv,shp}`** — **contrat de simulation** (curaté, *sans* population,
   indépendant de la crise ; remplace `buildings_light`) : `ID`, géométrie, flags de
-  rôle (`is_residential`, `is_workplace` ; éducation/stratégique différés), **profil
+  rôle (`is_residential`, `is_workplace`, `is_education`, `is_strategic`) +
+  colonne **`fonction`** (§ 3.9), **profil
   vertical** (`n_etages`, `hauteur`, `emprise_m2`, `z_min_sol`, `z_max_toit` → la
   capacité de refuge est calculée **en aval** selon la cote d'inondation, donc côté
   crisis_gen), **vulnérabilité** (`mat_mur`, `mat_toit`, `annee_construction` — BDNB
@@ -244,7 +283,7 @@ crise**) → **crisis_gen** (NN D1-D5, inondation, capacité de refuge selon la 
 | `buildings.sliver_max_area_m2` | **20** | config.yaml | taille max d'un fragment absorbable (constante lib `SLIVER_MAX_AREA` = 15) |
 | `_SNAP_TOL` / `_SIZE_RATIO` / `_BOUNDARY_SHARE` | 0,3 m / 5 / 0,5 | buildings.py | collé / hôte ≥ 5× / part de contour (totale) mini |
 | `workplaces.usages` | Commercial/Industriel/Agricole/Religieux/Sportif | config.yaml | usages BD TOPO = lieux de travail |
-| `workplaces.decay_m` | 3000 | config.yaml | décroissance distance domicile-travail |
+| `workplaces.decay_m` | 3000 | config.yaml | décroissance distance domicile-travail (gravité **intra-commune** depuis MOBPRO ; échelle globale en repli) |
 | `workplaces.seed` | 42 | config.yaml | reproductibilité des tirages |
 | `education.decay_m` | 1200 | config.yaml | décroissance distance école (plus court) |
 | `sources.bdnb` | chemin gpkg | config.yaml | BDNB (optionnelle) |
@@ -299,6 +338,26 @@ crise**) → **crisis_gen** (NN D1-D5, inondation, capacité de refuge selon la 
   l'intérieur des IRIS, totaux conservés) — l'allocateur lissait ∝ NB_LOGTS, les
   ménages réels concentrent. Version allocateur gardée en `*_alloc`.
 
+### Session 2026-07 — chantier MOBPRO (affectation domicile-travail)
+
+- **Affectation travail en 2 étapes** (option B, § 3.8) : commune de travail tirée
+  sur les flux réels MOBPRO `P(c'|c)`, puis bâtiment par gravité intra-commune —
+  remplace la gravité pure région-entière au `decay_m` posé à la main (qui
+  sur-concentrait le travail près du domicile, aveugle aux vrais bassins d'emploi).
+- **Clip région + renormalisation** (`build_commute_matrix`) : les flux vers des
+  communes hors zone simulée sont écartés et chaque ligne renormalisée — tous les
+  actifs restent dans la zone (choix « évacuation » : pas d'agents qui sortent de
+  la carte). Les actifs venant de l'extérieur travailler dans la zone = chantier
+  futur, hors périmètre.
+- **Replis en cascade** : commune de résidence hors matrice ou commune tirée sans
+  lieu de travail → gravité globale ; MOBPRO indisponible → gravité pure (le
+  pipeline tourne sans réseau). Comparatif « flux générés vs MOBPRO » loggé à
+  chaque run.
+- **Commune d'un bâtiment = `code_iris[:5]`** — côté domiciles le code est garanti
+  (réécrit par `spatial_join`, str 9 car.) ; côté lieux de travail (`buildings_all`)
+  l'attribut BD TOPO est lacunaire → parse tolérant, bâtiments sans code tirables
+  seulement au repli global.
+
 (Historique fin : `git log` du dépôt.)
 
 ## 6. Pistes écartées (avec preuve chiffrée)
@@ -328,10 +387,16 @@ crise**) → **crisis_gen** (NN D1-D5, inondation, capacité de refuge selon la 
   nombre de ménages d'un petit IRIS), la **forme d'âge locale** encaisse l'écart
   (le tilt privilégie population + nombre de ménages) — signalé par le WARNING
   par IRIS ; les **centenaires** (>99 ans) sont absents des agents (~0,01 %).
-- **Gravitaires non calibrés** (decays au doigt mouillé) — calage MOBPRO réservé.
+- **Travail** : la répartition **entre communes** est calée sur MOBPRO (§ 3.8),
+  mais le `decay_m` **intra-commune** (3000 m) et le decay éducation (1200 m)
+  restent posés à la main ; capacité d'un lieu de travail = surface de plancher
+  (pas de densité d'emploi par usage, pas d'effectifs SIRENE).
 - Capacité des équipements éducatifs **uniforme** (donnée BPE absente).
 - 15-17 ans comptés en **mineurs côté CSP** (léger écart avec la pop INSEE « 15+ »).
-- Pas de **fuite hors région** ni de **télétravail** ; tout actif travaille dans la zone.
+- Pas de **fuite hors région** ni de **télétravail** : les flux MOBPRO sortants
+  sont réaffectés aux destinations internes (clip + renormalisation), et les
+  actifs **entrants** (résidence extérieure, travail dans la zone) ne sont pas
+  modélisés.
 - ~23 000 Indifférencié restants laissés tels quels (structures sans contenu).
 - `code_iris` : réécrit en **str 9 caractères** (IRIS d'allocation) par
   `spatial_join` sur les bâtiments joints ; reste en **float** sur les couches
@@ -353,9 +418,13 @@ crise**) → **crisis_gen** (NN D1-D5, inondation, capacité de refuge selon la 
    10 seeds). Décisions verrouillées, décisions de session et **pièges à ne pas
    refaire** : `claude.md` § « population en ménages ». **Reste ouvert (futur)** :
    placement dédié des communautés (EHPAD → bâtiments `fonction=ehpad`, D4).
-1. **Brancher MOBPRO** — caler le gravitaire domicile-travail (affectation 2 étapes :
-   tirer la commune de travail via flux MOBPRO, puis bâtiment par gravité). Notes
-   détaillées dans `claude.md` (§ Chantier MOBPRO).
+1. ~~**Brancher MOBPRO**~~ — **FAIT** (§ 3.8) : affectation travail en 2 étapes
+   (commune via flux MOBPRO `P(c'|c)` clippés région, puis bâtiment par gravité
+   intra-commune), replis gravité globale / gravité pure. Validation :
+   `test_commute.py` (contrat) + `test_commute_realdata.py` (vraie base) +
+   comparatif flux loggé au run. **Reste ouvert (futur)** : actifs entrants
+   (résidence hors zone), calage du `decay_m` intra-commune, capacité
+   d'emploi réelle (SIRENE).
 2. ~~**Flags de rôle `is_education` / `is_strategic`**~~ — **FAIT** (`loaders/poi.py`,
    étapes 5-8 de `step_env`, colonne `fonction` + flags dans le contrat `env`) :
    - `is_education` : matching **BPE → footprint** (point-in-polygon).
@@ -365,11 +434,11 @@ crise**) → **crisis_gen** (NN D1-D5, inondation, capacité de refuge selon la 
 3. **Capacité de refuge vertical** — *hors env_generator*, côté **crisis_gen** :
    dérivée du profil vertical (`n_etages`, `z_*`) et de la **cote d'inondation du
    scénario** (rupture totale ≠ partielle → refuges différents). env_generator
-   n'expose que les ingrédients (cf. § 3.9).
+   n'expose que les ingrédients (cf. § 3.10).
 4. **Migrer `casualties.py` vers les agents** quand il rejoindra crisis_gen : il lit
    aujourd'hui `population_allouee` sur `buildings.*` ; demain `groupby home_id` sur
    `agents.csv`.
-5. ~~Absorption de slivers~~ — **fait** (§ 9). ~~Contrat de sortie `env`~~ — **fait** (§ 3.9).
+5. ~~Absorption de slivers~~ — **fait** (§ 9). ~~Contrat de sortie `env`~~ — **fait** (§ 3.10).
 
 ---
 

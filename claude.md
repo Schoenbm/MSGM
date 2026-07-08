@@ -10,7 +10,7 @@ Dépôt GitHub : `github.com/Schoenbm/MSGM` (monorepo). Branche : `master`.
 
 ```
 MSGM/
-├── README.md          # vue d'ensemble (placeholder assumé, à reprendre)
+├── README.md          # vue d'ensemble du dépôt (philosophie + carte des modules)
 ├── claude.md          # ce fichier
 └── env_generator/     # MODULE 1 — voir env_generator/claude.md pour les détails
 ```

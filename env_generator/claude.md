@@ -41,13 +41,13 @@ env_generator/
 │   │   ├── roads.py             # réseau routier OSM (osmnx, walk/drive) -> Lambert-93
 │   │   ├── bpe.py               # BPE 2024 : équipements éducatifs géolocalisés (crèche/école/collège/lycée)
 │   │   ├── bdnb.py              # BDNB (CSTB) : usage (residentiel/travail/annexe) -> qualifie Indiff. ; + matériaux/période (ffo) pour vulnérabilité
-│   │   ├── mobpro.py            # flux domicile-travail INSEE (MOBPRO 2022) — calage futur
+│   │   ├── mobpro.py            # flux domicile-travail INSEE (MOBPRO 2022) -> matrice P(c'|c) travail
 │   │   └── rp_detail.py         # RP détail (indiv. canton-ou-ville 2022) : échantillon de ménages réels (chemin ménages)
 │   ├── matching/
 │   │   ├── spatial_join.py      # centroïdes bâtiments ↔ grille (porte âge/CSP + code_iris d'allocation)
 │   │   ├── allocator.py         # allocation pop/ménages + âge/CSP (plus fort reste)
 │   │   ├── agents.py            # génère les agents : MÉNAGES réels (principal) ou individus (repli)
-│   │   ├── workplaces.py        # affectation gravitaire d'un lieu de travail aux actifs
+│   │   ├── workplaces.py        # domicile-travail : 2 étapes calées MOBPRO (commune puis gravité) + gravité pure en repli
 │   │   └── households.py        # IPU ménage×individu : marges IRIS + composition ménages + tilt taille
 │   ├── output/
 │   │   ├── export.py            # merge_buildings + export_buildings (complète) ; build_env_layer/export_env (contrat env) ; export_agents
@@ -55,7 +55,7 @@ env_generator/
 │   │   ├── compare.py / compare_grid.py  # validation vs recensement
 │   │   └── casualties.py        # victimes/sans-abris depuis dommages D1..D5
 │   └── utils/logging_config.py
-└── tests/                       # pytest (~398 tests ; test_*realdata.py skippés si cache/données absents)
+└── tests/                       # pytest (~411 tests ; test_*realdata.py skippés si cache/données absents)
 ```
 
 > ⚠️ `loaders/osm.py` concerne les **bâtiments** (tags flats/levels), PAS le
@@ -111,14 +111,21 @@ microsimulation par tirage d'individus indépendants, PAS un IPF) :
 `assign_facilities` (inspiré du localisateur `spll`/`GravityFunction` de Genstar) :
 affecte par activité une destination tirée par `P(j|i) ∝ capacité_j × exp(-dist_ij
 / decay_m)`, réutilisé pour travail / école / crèche :
-- **travail** : bâtiments de la couche région (frame interne `all_buildings`,
+- **travail — 2 étapes calées MOBPRO** (`assign_workplaces_mobpro`, chemin
+  principal ; cf. section « chantier MOBPRO — FAIT ») : (1) commune de travail c'
+  tirée selon la matrice `P(c'|c)` des flux MOBPRO clippée aux communes région +
+  renormalisée (`build_commute_matrix`), (2) bâtiment tiré par la gravité
+  ci-dessus **restreinte aux lieux de travail de c'**. Replis : commune hors
+  matrice ou c' sans lieu de travail → gravité globale ; MOBPRO indisponible →
+  `assign_facilities` pur (chemin historique). Lieux de travail = bâtiments de la
+  couche région (frame interne `all_buildings`,
   pas un fichier de sortie : l'export est la couche unique `buildings`) dont `USAGE1`/`USAGE2` ∈
   `workplaces.usages` (défaut Commercial et services, Industriel, Agricole,
   Religieux, Sportif), **+ récupération BDNB** : les bâtiments dont
   `usage_principal_bdnb_open` ∈ {Tertiaire, Secondaire, Primaire} (passés via
   `extra_ids`, cf. `loaders/bdnb.py`) rattrapent une partie des « Indifférencié »
   exclus par la BD TOPO (~+4 500 lieux de travail sur la métropole). Capacité =
-  surface de plancher ; `workplaces.decay_m` (déf. 3000 m).
+  surface de plancher ; `workplaces.decay_m` (déf. 3000 m, gravité intra-commune).
 - **crèche / école / collège / lycée** : équipements **BPE** géolocalisés
   (`loaders.bpe.load_bpe_education`, codes `TYPEQU` → niveau exact) ; capacité
   unité (la capacité d'accueil BPE n'est pas renseignée pour l'enseignement →
@@ -182,16 +189,20 @@ Lambert-93 (`equip_id`, `kind`, `capacity`, `nom`).
 
 **MOBPRO (`loaders/mobpro.py`).** Télécharge (via `ensure_cached`) la base de flux
 domicile-travail INSEE 2022 (commune→commune, ~11 Mo, `NBFLUX_C22_ACTOCC15P`).
-`load_mobpro(communes=[...])` filtre par commune de résidence. **Pas encore
-branché** : réservé au calage futur des `decay_m` (gravitaire non calibré).
+`load_mobpro(communes=[...])` filtre par commune de résidence. **Branché** dans
+`step_env` : la matrice `P(c'|c)` (`workplaces.build_commute_matrix`, clip région
++ renormalisation) pilote l'étape 1 de l'affectation travail (cf. section
+« chantier MOBPRO — FAIT »). Indisponible → gravité pure, le pipeline tourne sans.
 
 > Assomptions du premier jet (« on redesignera si besoin ») : âge et CSP tirés
 > comme marges indépendantes (**repli seulement** — le chemin ménages OBSERVE la
 > table jointe âge×CSP×ménage des ménages réels) ; seuil adulte 18 ans (15-17 ans
 > en mineurs côté CSP) ; retraite couperet à 62 ans ; équipements éducatifs à
 > capacité uniforme (capacité BPE absente) ; niveaux scolaires distingués par âge
-> (répartition uniforme) ; pas de fuite hors région ni télétravail ; gravitaires
-> non calibrés. Voir les docstrings de `agents.py` / `workplaces.py`.
+> (répartition uniforme) ; pas de fuite hors région ni télétravail (flux MOBPRO
+> sortants réaffectés en interne, actifs entrants non modélisés) ; `decay_m`
+> intra-commune et éducation non calibrés (la répartition ENTRE communes, elle,
+> est calée MOBPRO). Voir les docstrings de `agents.py` / `workplaces.py`.
 
 ---
 
@@ -207,7 +218,7 @@ branché** : réservé au calage futur des `decay_m` (gravitaire non calibré).
 | **OSM — réseau routier** (osmnx) | live | `loaders/roads.py` | Réseau routier piéton + voiture (Lambert-93). | Active | https://www.openstreetmap.org |
 | **BPE** (INSEE) | 2024 | `loaders/bpe.py` | **Équipements éducatifs géolocalisés** (`TYPEQU`) : crèche/école/collège/lycée. | Active | https://www.insee.fr/fr/statistiques/8217525 |
 | **BDNB** (CSTB) | local (~2,5 Go) | `loaders/bdnb.py` | `usage_principal_bdnb_open` → catégorie (travail / résidentiel / annexe) : **qualifie les « Indifférencié »** BD TOPO. Ajoute des lieux de travail ET affine le filtre résidentiel. Annote `usage_bdnb`. **Aussi : matériaux/période** (`ffo_bat_*`, `load_bdnb_building_attrs`) → contrat `env` pour la vulnérabilité (NN D1-D5). | **Active** (optionnelle) | https://bdnb.io |
-| **MOBPRO** (INSEE) | 2022 | `loaders/mobpro.py` | Flux domicile-travail commune→commune. | **Réservée** — calage futur, non branchée | https://www.insee.fr/fr/statistiques/8582949 |
+| **MOBPRO** (INSEE) | 2022 | `loaders/mobpro.py` | Flux domicile-travail commune→commune → matrice `P(c'\|c)` de l'affectation travail (2 étapes, clip région). Optionnelle : sans elle, gravité pure. | **Active** | https://www.insee.fr/fr/statistiques/8582949 |
 | **RP détail — Individus canton-ou-ville** (INSEE) | 2022 | `loaders/rp_detail.py` | **Échantillon de ménages réels** (membres + âge + CSP + rôle `LPRM`) pour la génération sample-based en ménages (`generate_household_agents`). Zone E (contient l'Isère). | **Active** — chemin principal des agents en `--source iris` | https://www.insee.fr/fr/statistiques/8647104 |
 | **RP base-ic — couples-familles-ménages** (INSEE) | 2022 | `loaders/iris.py` | **Composition des ménages par IRIS** (`C22_MENPSEUL/SFAM/COUPSENF/COUPAENF/FAMMONO` → `men_*`) : contraintes de niveau ménage de l'IPU (pince la distribution des tailles). Optionnelle : sans elle, repli sur la contrainte du seul nombre. | **Active** | https://www.insee.fr/fr/statistiques/8647008 |
 
@@ -424,53 +435,63 @@ ci-dessus ; valider sur données réelles avant de committer ce chantier.
 
 ---
 
-## Chantier suivant — brancher MOBPRO (calage domicile-travail)
+## Chantier — brancher MOBPRO (affectation domicile-travail) — FAIT
 
-Objectif : remplacer le `decay_m=3000 m` posé à la main par un calage sur les flux
-réels domicile-travail INSEE, pour des trajets d'agents réalistes.
+Remplace la gravité pure région-entière (`decay_m=3000 m` posé à la main, aveugle
+aux vrais bassins d'emploi) par une **affectation en 2 étapes calée sur les flux
+réels** domicile-travail INSEE (MOBPRO 2022), la gravité restant l'étape
+intra-commune. Implémenté dans `matching/workplaces.py`, câblé via
+`agents._assign_destinations` (activité `travail` seule ; école/crèche inchangées)
+et `main.step_env`.
 
-**État** : `loaders/mobpro.py` est écrit et **testé**, mais **non branché** dans le
-pipeline. La base est déjà en cache (`data/cache/mobpro-flux-2022.zip`).
+**Décisions verrouillées (appliquées)** :
+- **D1 = Option B (2 étapes)** : (1) commune de travail `c'` tirée selon
+  `P(c'|c) = NBFLUX(c,c') / Σ NBFLUX(c,·)` (MOBPRO) ; (2) dans `c'`, bâtiment tiré
+  par le gravitaire habituel (capacité × exp(-dist/decay_m)) restreint aux lieux
+  de travail de `c'`.
+- **D2 = (a) clip région + renormalisation** (`build_commute_matrix`) : seuls les
+  flux dont résidence ET travail sont dans les communes de la région sont gardés,
+  lignes renormalisées à 1 (les actifs qui travailleraient hors zone sont
+  réaffectés en interne — personne ne sort de la carte). Les actifs **entrants**
+  (résidence extérieure) = chantier futur, hors périmètre. Une commune de
+  résidence sans destination en région est ABSENTE de l'index de la matrice.
+- **D3 = replis** : commune de résidence hors matrice, OU `c'` sans lieu de
+  travail identifié → gravité globale sur toute la région (chemin historique).
+  Repli global : MOBPRO indisponible (cache/réseau) → `assign_facilities` pur ;
+  le pipeline tourne sans MOBPRO.
 
-**API existante** : `load_mobpro(communes=None)` → DataFrame avec
-`CODGEO` (commune résidence), `DCLT` (commune travail), `NBFLUX_C22_ACTOCC15P`
-(nb d'actifs). `communes=[...]` filtre la commune de **résidence**.
+**API** (`matching/workplaces.py`) :
+- `build_commute_matrix(mobpro_df, region_communes)` → DataFrame `P(c'|c)` (index
+  = communes de résidence en région, colonnes = communes de travail en région,
+  lignes sommant à 1).
+- `assign_workplaces_mobpro(workers, workplaces, commute_matrix, decay_m=3000.0,
+  seed=42)` → workers + `dest_id`/`dist_m`/`dest_x`/`dest_y`. `workers` porte
+  `home_id`, `commune` (résidence) et le point domicile ; `workplaces` porte `ID`,
+  `capacity`, `commune`. Déterministe à seed fixé. Logge un **comparatif des plus
+  gros flux générés vs MOBPRO** (validation à l'œil : les gros flux dominent).
 
-**Approche recommandée — affectation en 2 étapes** (Option B des échanges) :
-1. Pour un travailleur de commune `c`, tirer sa **commune de travail** `c'` selon
-   `P(c'|c) = NBFLUX(c,c') / Σ_c' NBFLUX(c,c')` (distribution MOBPRO).
-2. Dans `c'`, choisir le **bâtiment** précis par le gravitaire actuel
-   (capacité × exp(-dist/decay_m)) restreint aux lieux de travail de `c'`.
-Plus fidèle que de tout faire reposer sur la distance. (Option A plus légère :
-ne caler que `decay_m` sur la distribution de distances observée.)
+**Intégration** :
+- Commune d'un bâtiment = `code_iris[:5]`. Côté **domiciles**, `code_iris` est un
+  **string 9 caractères garanti** (réécrit par `spatial_join` depuis la cellule
+  d'allocation — l'ancienne note « float » de ce chantier est périmée). Côté
+  **lieux de travail** (`buildings_all`), l'attribut vient du shapefile BD TOPO :
+  **lacunaire et parfois float** → parse tolérant (`agents._commune_code`), les
+  bâtiments sans code restent tirables au repli global mais pas à l'étape
+  intra-commune.
+- `main.step_env` : communes région = préfixes 5 des codes du sélecteur `region`
+  de la config (ou de la zone population si `same_as`) ; `load_mobpro` filtré sur
+  ces communes ; la matrice passe par `agent_kwargs` aux deux générateurs
+  (`generate_household_agents` ET `generate_agents`, param `commute_matrix`).
 
-**Briques nécessaires / points d'intégration** :
-- **Commune d'un bâtiment** = `code_iris` → `str(int(x)).zfill(9)[:5]`. ⚠️ `code_iris`
-  est en **float** dans les sorties (ex. `384710000.0`) ; le `zfill(9)` gère les
-  départements < 10 (zéro de tête). Présent sur `result` (domiciles) **et**
-  `buildings_all` (lieux de travail).
-- `workplaces.identify_workplaces` renvoie déjà les lieux de travail ; il faudra
-  leur attacher leur commune (`code_iris[:5]`) pour les regrouper par `c'`.
-- Adapter `workplaces.assign_facilities` (ou ajouter une variante MOBPRO-aware)
-  pour : grouper les actifs par commune de domicile, tirer `c'` via MOBPRO, puis
-  gravité intra-`c'`. Garder le chemin actuel (sans MOBPRO) en repli.
-- Câbler dans `matching/agents.py` (passer la table MOBPRO / la matrice `P(c'|c)`)
-  et `main.py` `step_env` (charger via `load_mobpro(communes=<communes de la région>)`).
-  Les communes de la région = préfixes 5 des `CODE_IRIS` de la config `region`.
+**Tests** : `tests/test_commute.py` (contrat, fixture synthétique : clip/renorm,
+tirage 2 étapes, replis, déterminisme) + `tests/test_commute_realdata.py` (vraie
+base MOBPRO : lignes à 1, clip région, renormalisation recalculée à la main,
+auto-flux de Grenoble plausible). Validation runtime : comparatif de flux loggé à
+chaque run.
 
-**Décisions à trancher** :
-- **Flux sortant de la région** : MOBPRO enverra des actifs vers des communes hors
-  zone simulée. Choix : (a) clipper aux communes de la région + renormaliser
-  `P(c'|c)`, ou (b) modéliser un agent « travaille à l'extérieur » (sort de la
-  carte). Pour l'évacuation, (a) est plus simple ; (b) plus réaliste.
-- **Commune `c'` sans lieu de travail identifié** dans la zone (aucun bâtiment
-  emploi) → repli : gravité globale sur toute la région.
-- `decay_m` reste utile pour la gravité **intra-commune** (étape 2).
-
-**Validation** : comparer la distribution des distances domicile-travail générées
-et/ou la matrice de flux commune→commune des agents à MOBPRO (étalon).
-
-**Données** : millésime 2022 (couplé au code). Colonnes confirmées ci-dessus.
+**Piège rencontré (mesuré)** : `Series.astype(str)` pandas **préserve les NaN**
+(ne les stringifie pas) → `np.unique` sur les communes mélangées str/NaN plante ;
+d'où le parse tolérant explicite des communes des deux côtés.
 
 ---
 

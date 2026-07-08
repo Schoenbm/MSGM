@@ -49,6 +49,7 @@ from src.matching.workplaces import (
     ACTIVE_CSP_COLS,
     DEFAULT_WORKPLACE_USAGES,
     assign_facilities,
+    assign_workplaces_mobpro,
     identify_workplaces,
 )
 
@@ -107,6 +108,7 @@ def generate_agents(
     education_decay_m: float = 1200.0,
     seed: int = 42,
     workplace_extra_ids: "set[str] | None" = None,
+    commute_matrix: "pd.DataFrame | None" = None,
 ) -> gpd.GeoDataFrame:
     """Génère un GeoDataFrame d'agents individuels (domicile, âge, CSP, activité).
 
@@ -133,6 +135,10 @@ def generate_agents(
         seed:        graine du tirage (reproductibilité).
         workplace_extra_ids: ID BD TOPO d'emploi récupérés via la BDNB (étendent
                      les lieux de travail au-delà des usages BD TOPO).
+        commute_matrix: matrice MOBPRO P(c'|c) (cf. workplaces.build_commute_matrix).
+                     Si fournie, le lieu de travail est tiré en 2 étapes calées
+                     sur les flux réels (assign_workplaces_mobpro) ; sinon
+                     gravité pure sur toute la région (chemin historique).
 
     Returns:
         GeoDataFrame, une ligne par agent. Colonnes : agent_id, home_id, age,
@@ -211,8 +217,10 @@ def generate_agents(
         len(agents), agents["age"].mean(), agents["activity"].value_counts().to_dict(),
     )
 
+    home_communes = _home_communes(res) if commute_matrix is not None else None
     return _assign_destinations(agents, all_buildings, education, usages,
-                                decay_m, education_decay_m, seed, workplace_extra_ids)
+                                decay_m, education_decay_m, seed, workplace_extra_ids,
+                                commute_matrix, home_communes)
 
 
 def _assign_destinations(
@@ -224,12 +232,19 @@ def _assign_destinations(
     education_decay_m: float,
     seed: int,
     workplace_extra_ids: "set[str] | None",
+    commute_matrix: "pd.DataFrame | None" = None,
+    home_communes: "pd.Series | None" = None,
 ) -> gpd.GeoDataFrame:
     """Affecte les destinations par activité, chacune sur son propre jeu d'équipements.
 
     Partagé entre `generate_agents` et `generate_household_agents` (V5 : le tirage
     en ménages ne change rien à l'affectation des destinations). Enrichit `agents`
     des colonnes dest_id, dest_x, dest_y, dist_m.
+
+    Travail : si `commute_matrix` (MOBPRO, P(c'|c)) et `home_communes` (ID bâtiment
+    -> commune de résidence) sont fournis, affectation en 2 étapes calée sur les
+    flux réels (assign_workplaces_mobpro) ; sinon gravité pure (repli global).
+    Les autres activités (école/crèche…) restent en gravité de proximité.
     """
     crs = agents.crs
     agents["dest_id"] = pd.array([pd.NA] * len(agents), dtype="object")
@@ -237,6 +252,20 @@ def _assign_destinations(
         agents[col] = np.nan
 
     workplaces = identify_workplaces(all_buildings, usages, extra_ids=workplace_extra_ids)
+    use_mobpro = commute_matrix is not None and len(commute_matrix) > 0
+    if use_mobpro and home_communes is None:
+        logger.warning("Matrice MOBPRO fournie mais communes des domiciles inconnues "
+                       "(code_iris/ID absents) — affectation travail par gravité pure")
+        use_mobpro = False
+    if use_mobpro and not workplaces.empty:
+        # Commune d'un lieu de travail = code_iris[:5]. Sur buildings_all, le
+        # code_iris vient du shapefile BD TOPO (lacunaire, parfois float) : les
+        # bâtiments sans code restent tirables au repli global (D3) mais pas à
+        # l'étape intra-commune.
+        wp_iris = (workplaces["code_iris"] if "code_iris" in workplaces.columns
+                   else pd.Series(pd.NA, index=workplaces.index))
+        workplaces["commune"] = wp_iris.map(_commune_code)
+
     # Collège/lycée retombent sur le pool "école" si leur sous-ensemble BPE est
     # vide (sécurité ; en pratique BPE distingue les niveaux par TYPEQU).
     plans = [
@@ -254,8 +283,14 @@ def _assign_destinations(
             logger.warning("Aucun %s — %d agents '%s' sans destination",
                            label, len(sub), activity)
             continue
-        assigned = assign_facilities(sub, facilities, decay_m=decay, seed=seed,
-                                     id_col=id_col, label=label)
+        if activity == ACT_TRAVAIL and use_mobpro:
+            workers = sub.copy()
+            workers["commune"] = workers["home_id"].map(home_communes)
+            assigned = assign_workplaces_mobpro(workers, facilities, commute_matrix,
+                                                decay_m=decay, seed=seed)
+        else:
+            assigned = assign_facilities(sub, facilities, decay_m=decay, seed=seed,
+                                         id_col=id_col, label=label)
         for col in ("dest_id", "dest_x", "dest_y", "dist_m"):
             agents.loc[sub.index, col] = assigned[col].values
 
@@ -272,6 +307,7 @@ def generate_household_agents(
     education_decay_m: float = 1200.0,
     seed: int = 42,
     workplace_extra_ids: "set[str] | None" = None,
+    commute_matrix: "pd.DataFrame | None" = None,
 ) -> gpd.GeoDataFrame:
     """Génère la population en tirant des MÉNAGES RÉELS (sample-based, briques 3-4).
 
@@ -309,6 +345,8 @@ def generate_household_agents(
         education_decay_m: idem pour école/crèche.
         seed:        graine du tirage (reproductibilité).
         workplace_extra_ids: ID BD TOPO d'emploi récupérés via la BDNB.
+        commute_matrix: matrice MOBPRO P(c'|c) — travail affecté en 2 étapes
+                     calées sur les flux réels si fournie (cf. generate_agents).
 
     Returns:
         GeoDataFrame, une ligne par agent. Colonnes de generate_agents +
@@ -327,18 +365,19 @@ def generate_household_agents(
     if members is None or len(members) == 0:
         return _fallback_individual(residential, all_buildings, education, usages,
                                     decay_m, education_decay_m, seed,
-                                    workplace_extra_ids, "pool RP vide")
+                                    workplace_extra_ids, commute_matrix, "pool RP vide")
     if "menages_alloues" not in residential.columns:
         return _fallback_individual(residential, all_buildings, education, usages,
                                     decay_m, education_decay_m, seed,
-                                    workplace_extra_ids,
+                                    workplace_extra_ids, commute_matrix,
                                     "menages_alloues absent (mode Filosofi ?)")
 
     pool = _sanitize_pool(members)
     if pool.empty:
         return _fallback_individual(residential, all_buildings, education, usages,
                                     decay_m, education_decay_m, seed,
-                                    workplace_extra_ids, "pool RP vide après garde-fous")
+                                    workplace_extra_ids, commute_matrix,
+                                    "pool RP vide après garde-fous")
 
     crs = residential.crs
     res = residential.loc[residential["menages_alloues"].fillna(0) > 0].copy()
@@ -481,8 +520,10 @@ def generate_household_agents(
             100.0 * (worst_size[2] - worst_size[3]) / worst_size[3],
         )
 
+    home_communes = _home_communes(res) if commute_matrix is not None else None
     agents = _assign_destinations(agents, all_buildings, education, usages,
-                                  decay_m, education_decay_m, seed, workplace_extra_ids)
+                                  decay_m, education_decay_m, seed, workplace_extra_ids,
+                                  commute_matrix, home_communes)
 
     # D2 : une seule vérité de population — population_allouee recalculé EN PLACE
     # depuis les agents. casualties.py (lecteur de population_allouee) reste juste.
@@ -636,14 +677,15 @@ def _sanitize_pool(members: pd.DataFrame) -> pd.DataFrame:
 
 def _fallback_individual(residential, all_buildings, education, usages, decay_m,
                          education_decay_m, seed, workplace_extra_ids,
-                         reason: str) -> gpd.GeoDataFrame:
+                         commute_matrix, reason: str) -> gpd.GeoDataFrame:
     """Dernier recours (D5/V3) : ancien tirage d'individus, schéma ménages conservé."""
     logger.warning("Tirage en ménages impossible (%s) — repli sur le tirage "
                    "d'individus indépendants (generate_agents)", reason)
     agents = generate_agents(residential, all_buildings, education=education,
                              usages=usages, decay_m=decay_m,
                              education_decay_m=education_decay_m, seed=seed,
-                             workplace_extra_ids=workplace_extra_ids)
+                             workplace_extra_ids=workplace_extra_ids,
+                             commute_matrix=commute_matrix)
     agents["household_id"] = pd.array([pd.NA] * len(agents), dtype="object")
     agents["role"] = pd.array([pd.NA] * len(agents), dtype="object")
     return agents
@@ -652,6 +694,34 @@ def _fallback_individual(residential, all_buildings, education, usages, decay_m,
 def _iris_code(x) -> str:
     """Code IRIS 9 caractères depuis `code_iris` (float en sortie d'allocation)."""
     return str(int(float(x))).zfill(9)
+
+
+def _commune_code(x) -> "str | None":
+    """Commune (5 car.) depuis le `code_iris` d'un bâtiment — TOLÉRANT.
+
+    Contrairement à `_iris_code` (allocation, code garanti), le code_iris de
+    `buildings_all` vient du shapefile BD TOPO : lacunaire (NaN) et parfois float.
+    None si inconnu (le bâtiment reste au repli global D3 côté MOBPRO).
+    """
+    if x is None or (isinstance(x, float) and np.isnan(x)):
+        return None
+    try:
+        return _iris_code(x)[:5]
+    except (TypeError, ValueError):
+        s = str(x).strip()
+        return s[:5] if len(s) >= 5 else None
+
+
+def _home_communes(res: gpd.GeoDataFrame) -> "pd.Series | None":
+    """Commune de résidence par bâtiment (ID -> code_iris[:5]).
+
+    Côté « workers » de l'affectation MOBPRO (assign_workplaces_mobpro). None si
+    code_iris/ID indisponibles — l'appelant retombe en gravité pure.
+    """
+    if "code_iris" not in res.columns or "ID" not in res.columns:
+        return None
+    return pd.Series(res["code_iris"].map(_commune_code).to_numpy(),
+                     index=res["ID"].to_numpy())
 
 
 def _bands_from_ages(ages: np.ndarray) -> np.ndarray:
